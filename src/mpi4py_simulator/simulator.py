@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from time import perf_counter
 from typing import Any, cast
 
 from greenlet import getcurrent, greenlet
@@ -60,7 +61,9 @@ class Request:
         """Whether the operation has completed on the simulated timeline.
 
         Reading this property does not advance simulated time. Prefer :meth:`test`
-        when the received value or status metadata is also needed.
+        when the received value or status metadata is also needed. A nonblocking
+        receive whose payload has arrived remains incomplete until ``wait`` or
+        ``test`` charges any receiver-side processing and materializes the object.
         """
         return self._request.complete
 
@@ -95,7 +98,7 @@ class Request:
         return self.wait(status)
 
     def test(self, status: Status | None = None) -> tuple[bool, Any]:
-        """Check for completion without advancing simulated time.
+        """Check whether this request can complete.
 
         Args:
             status: Optional status object updated when a receive has completed.
@@ -107,6 +110,11 @@ class Request:
 
         Raises:
             ValueError: If the request belongs to another virtual rank.
+
+        Notes:
+            An unmatched request returns immediately without advancing simulated
+            time. For a matched receive, this call charges configured receiver and
+            deserialization CPU time before returning the value.
 
         """
         return cast("tuple[bool, Any]", _suspend(_TestRequest(self._request, status)))
@@ -203,8 +211,9 @@ class Comm:
         """Send a Python object and suspend until the modeled send completes.
 
         Args:
-            value: Arbitrary Python object to send. It is deep-copied when the send
-                is posted if ``copy_messages=True`` was passed to :class:`Simulator`.
+            value: Arbitrary Python object to send. It is copied when the send is
+                posted if ``copy_messages=True`` was passed to :class:`Simulator`.
+                Configured payload byte rates use its pickled representation.
             dest: Zero-based destination rank in ``range(comm.size)``.
             tag: Nonnegative integer used to match the message at the receiver.
 
@@ -213,9 +222,9 @@ class Comm:
                 negative.
 
         Notes:
-            Sends use buffered semantics. The sender resumes after
-            ``send_overhead`` and does not wait for a matching receive. The message
-            becomes available at the destination one configured ``latency`` later.
+            Sends use buffered semantics and do not wait for a matching receive. The
+            sender first pays its fixed overhead and configured serialization cost.
+            Transport then adds latency and any payload transfer time.
 
         """
         _suspend(_Send(value, dest, tag, nonblocking=False))
@@ -230,8 +239,9 @@ class Comm:
             tag: Nonnegative message tag.
 
         Returns:
-            A :class:`Request` that completes after the configured send overhead.
-            Posting the send itself does not advance the calling rank's virtual time.
+            A :class:`Request` after sender overhead and configured serialization
+            have been charged. This local posting work cannot overlap other work on
+            the same rank. Network transport may proceed while the rank continues.
 
         Raises:
             ValueError: If the destination or tag is invalid.
@@ -264,7 +274,8 @@ class Comm:
 
         Notes:
             A receive suspends only this virtual rank. After a message matches, the
-            rank resumes after the configured ``receive_overhead``.
+            rank resumes after its fixed receive overhead and configured
+            deserialization cost. Receiver CPU costs are serialized on that rank.
 
         """
         return _suspend(_Receive(source, tag, status, nonblocking=False))
@@ -289,6 +300,11 @@ class Comm:
 
         Raises:
             ValueError: If ``source`` or ``tag`` is invalid.
+
+        Notes:
+            Network transfer may finish while the rank does other work. Configured
+            receiver and deserialization CPU time is charged when ``wait`` or
+            ``test`` materializes the matched Python object.
 
         """
         request = _suspend(_Receive(source, tag, status, nonblocking=True))
@@ -393,8 +409,9 @@ class Comm:
         Notes:
             Only this rank is suspended. Other virtual ranks continue to process
             communication and computation events. Ordinary Python code consumes
-            wall-clock time but adds no simulated time, so expensive kernels should
-            usually be replaced by this call in large timing experiments.
+            wall-clock time and is charged only when ``measure_python=True``. Even in
+            that mode, expensive kernels should usually be replaced by this call in
+            large timing experiments so they are not really executed once per rank.
 
         """
         _suspend(_Compute(duration))
@@ -598,16 +615,34 @@ class Comm:
 
 
 class _RankTask(_Task):
-    def __init__(self, program: RankProgram, comm: Comm) -> None:
+    def __init__(
+        self,
+        program: RankProgram,
+        comm: Comm,
+        *,
+        measure_python: bool,
+    ) -> None:
         self._greenlet = greenlet(lambda: program(comm))
         self._started = False
+        self._measure_python = measure_python
+        self._python_seconds = 0.0
+
+    @property
+    def python_seconds(self) -> float:
+        return self._python_seconds
 
     def send(self, value: Any, /) -> object:
-        if self._started:
-            result = self._greenlet.switch(value)
-        else:
-            self._started = True
-            result = self._greenlet.switch()
+        started = perf_counter() if self._measure_python else 0.0
+        try:
+            if self._started:
+                result = self._greenlet.switch(value)
+            else:
+                self._started = True
+                result = self._greenlet.switch()
+        finally:
+            self._python_seconds = (
+                perf_counter() - started if self._measure_python else 0.0
+            )
         if self._greenlet.dead:
             raise StopIteration(result)
         return result
@@ -632,29 +667,44 @@ class Simulator:
         latency: One-way point-to-point message latency in simulated seconds. It is
             charged after the sender's send overhead.
         send_overhead: Simulated seconds for a rank to post or complete a buffered
-            send.
+            send. This sender-side CPU cost is serialized with computation and other
+            communication work on that rank.
         receive_overhead: Simulated seconds between matching a message and resuming
-            its receiver.
+            its receiver. This receiver-side CPU cost is serialized per rank.
         collective_latency: Simulated seconds between the last rank entering a
             collective and all participants resuming. When omitted, ``latency`` is
             used.
-        copy_messages: If ``True``, deep-copy objects when sends are posted and when
-            collective results are distributed. This approximates mpi4py object
-            serialization and prevents later mutation by the sender from changing a
-            message.
+        bandwidth: Optional point-to-point payload bandwidth in bytes per simulated
+            second. A message of ``n`` pickled bytes adds ``n / bandwidth`` to its
+            transport delay. ``None`` disables payload transfer cost.
+        serialization_bandwidth: Optional point-to-point sender serialization rate
+            in bytes per simulated second. Serialization time is charged to the
+            sending rank before both blocking and nonblocking sends return.
+        deserialization_bandwidth: Optional point-to-point receiver deserialization
+            rate in bytes per simulated second. Deserialization time is charged to
+            and serialized on the receiving rank.
+        measure_python: Whether to measure each rank's ordinary Python execution
+            between communicator calls and add it to that rank's simulated clock.
+            This captures coordinator bookkeeping without source instrumentation but
+            makes results dependent on the simulator host and current system load.
+        copy_messages: If ``True``, copy communicated objects so later mutation by a
+            sender cannot change a received value. Point-to-point messages use a
+            pickle round trip when payload byte rates are configured; otherwise the
+            simulator uses ``deepcopy``. Collective values use ``deepcopy``.
 
     Raises:
-        TypeError: If a timing argument is not numeric or ``copy_messages`` is not a
-            boolean.
-        ValueError: If ``size`` is not a positive integer or a timing argument is
-            negative, infinite, or NaN.
+        TypeError: If a timing or bandwidth argument has the wrong type, or a boolean
+            option is not a boolean.
+        ValueError: If ``size`` is not positive, a duration is negative, or a
+            configured bandwidth is not finite and positive.
 
     Notes:
         Timing parameters use seconds. The model has fixed latency and overhead; it
-        does not model payload bandwidth, congestion, topology, finite buffering, or
-        eager/rendezvous transitions. Ordinary Python work runs sequentially in the
-        real interpreter and adds no simulated time. Use :meth:`Comm.compute` to
-        represent measured or estimated computation cost.
+        can model payload size and calibrated byte rates, but does not model network
+        congestion, topology, finite buffering, or eager/rendezvous transitions.
+        Ordinary Python work runs sequentially in the real interpreter. It adds no
+        simulated time unless ``measure_python=True``. Use :meth:`Comm.compute` for
+        calibrated or synthetic computation on rank zero as well as worker ranks.
 
     """
 
@@ -666,6 +716,10 @@ class Simulator:
         send_overhead: float = 0.0,
         receive_overhead: float = 0.0,
         collective_latency: float | None = None,
+        bandwidth: float | None = None,
+        serialization_bandwidth: float | None = None,
+        deserialization_bandwidth: float | None = None,
+        measure_python: bool = False,
         copy_messages: bool = True,
     ) -> None:
         """Configure rank count, message costs, and object-copy behavior.
@@ -677,17 +731,31 @@ class Simulator:
             receive_overhead: Fixed receive-completion overhead in seconds.
             collective_latency: Fixed collective completion cost in seconds, or
                 ``None`` to reuse ``latency``.
-            copy_messages: Whether to deep-copy communicated Python objects.
+            bandwidth: Optional point-to-point payload bytes transferred per second.
+            serialization_bandwidth: Optional point-to-point payload bytes serialized
+                per second on the sender.
+            deserialization_bandwidth: Optional point-to-point payload bytes
+                deserialized per second on the receiver.
+            measure_python: Whether to charge measured rank-program execution between
+                communicator calls to the corresponding virtual rank.
+            copy_messages: Whether to copy communicated Python objects.
 
         """
+        if not isinstance(measure_python, bool):
+            msg = "measure_python must be a boolean"
+            raise TypeError(msg)
         self._engine = _EventEngine(
             size,
             latency=latency,
             send_overhead=send_overhead,
             receive_overhead=receive_overhead,
             collective_latency=collective_latency,
+            bandwidth=bandwidth,
+            serialization_bandwidth=serialization_bandwidth,
+            deserialization_bandwidth=deserialization_bandwidth,
             copy_messages=copy_messages,
         )
+        self._measure_python = measure_python
 
     @property
     def size(self) -> int:
@@ -726,7 +794,11 @@ class Simulator:
             raise TypeError(msg)
 
         return self._engine.run(
-            lambda rank: _RankTask(program, Comm(self._engine, rank)),
+            lambda rank: _RankTask(
+                program,
+                Comm(self._engine, rank),
+                measure_python=self._measure_python,
+            ),
         )
 
 

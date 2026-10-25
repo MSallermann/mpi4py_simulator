@@ -71,7 +71,7 @@ Instrumenting computation
 -------------------------
 
 Ordinary application Python runs for real, once per rank, and consumes wall time. It
-does not advance virtual time. Use this behavior intentionally:
+does not advance virtual time by default. Use this behavior intentionally:
 
 Functional test
    Run a small real kernel and assert rank return values. This checks more application
@@ -88,6 +88,27 @@ implementation calls ``comm.compute``.
 
 Do not call ``time.sleep`` to model work. It blocks the only real interpreter and
 changes wall time without changing virtual time.
+
+Accounting for coordinator logic
+--------------------------------
+
+Some work must execute because its result controls the protocol. Rank zero may, for
+example, update a priority queue and use the selected worker in its next send. Enable
+automatic Python timing once on the simulator:
+
+.. code-block:: python
+
+   result = Simulator(10_001, measure_python=True).run(rank_main)
+
+No rank-function changes are needed. The simulator measures each uninterrupted slice
+of rank Python between communicator calls. A rank's event-loop waiting and execution
+of other virtual ranks are not included. Rank-zero scheduling therefore contributes
+to its finish time while preserving the existing MPI control flow.
+
+The measurement applies to all ranks. Expensive worker kernels still execute for real
+and should be replaced with cheap models plus ``comm.compute`` at large rank counts.
+Because measurements depend on the host and current load, leave the option disabled
+and use calibrated explicit durations for reproducible comparisons.
 
 Supported calls
 ---------------
@@ -118,7 +139,7 @@ application boundary:
 
 ``MPI.Request.Waitall``
    Inject ``mpi4py_simulator.MPI`` into the dependency for the virtual run, or call
-   ``Request.waitall`` directly. See :doc:`chemfit` for a concrete example.
+   ``Request.waitall`` directly.
 
 ``MPI.SUM`` passed to ``comm.allreduce``
    This is supported when mpi4py is installed. ``mpi4py_simulator.SUM`` works without

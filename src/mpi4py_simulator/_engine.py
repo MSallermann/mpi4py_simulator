@@ -5,6 +5,7 @@ from __future__ import annotations
 import heapq
 import math
 import operator
+import pickle
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -15,6 +16,11 @@ from ._status import ANY_SOURCE, ANY_TAG, Status
 
 class _Task(Protocol):
     """A suspended rank program driven by the simulation event loop."""
+
+    @property
+    def python_seconds(self) -> float:
+        """Wall time spent in the most recent rank-program slice."""
+        ...
 
     def send(self, value: Any, /) -> object:
         """Resume the program until its next simulated operation."""
@@ -85,8 +91,13 @@ class SimulationStats:
         pending_messages: Sent point-to-point messages that remained unmatched when
             all rank functions returned.
         rank_finish_seconds: Simulated return time for each rank, indexed by rank.
-        rank_compute_seconds: Total duration passed to :meth:`Comm.compute` by each
-            rank.
+        rank_compute_seconds: Total modeled computation explicitly charged through
+            :meth:`Comm.compute` by each rank.
+        rank_python_seconds: Python execution time measured automatically for each
+            rank. It is zero when ``measure_python=False``.
+        rank_communication_seconds: Sender and receiver CPU time charged to each
+            rank. This includes fixed overhead and configured serialization or
+            deserialization time, but excludes network transit and collective delay.
         rank_compute_idle_seconds: Gaps between consecutive ``compute`` calls on each
             rank. Initial waiting before a rank's first compute call is excluded.
         rank_last_compute_finish_seconds: End time of each rank's final ``compute``
@@ -105,6 +116,8 @@ class SimulationStats:
     pending_messages: int
     rank_finish_seconds: tuple[float, ...]
     rank_compute_seconds: tuple[float, ...]
+    rank_python_seconds: tuple[float, ...]
+    rank_communication_seconds: tuple[float, ...]
     rank_compute_idle_seconds: tuple[float, ...]
     rank_last_compute_finish_seconds: tuple[float, ...]
 
@@ -191,14 +204,23 @@ class _Collective:
 class _RequestState:
     """Event-engine state for one nonblocking operation."""
 
-    def __init__(self, owner: int, *, receive: bool) -> None:
+    def __init__(
+        self,
+        owner: int,
+        *,
+        receive: bool,
+        defer_completion: bool = False,
+    ) -> None:
         self._owner = owner
         self._receive = receive
+        self._defer_completion = defer_completion
         self._complete = False
+        self._completion_scheduled = False
         self._value: Any = None
+        self._matched_message: _Message | None = None
         self._source = ANY_SOURCE
         self._tag = ANY_TAG
-        self._waiters: list[tuple[int, Status | None]] = []
+        self._waiters: list[tuple[int, Status | None, bool]] = []
         self._completion_statuses: list[Status] = []
 
     @property
@@ -220,6 +242,8 @@ class _Message:
     destination: int
     tag: int
     value: Any
+    size_bytes: int
+    pickled: bool
     sequence: int
 
 
@@ -240,6 +264,9 @@ class _EventEngine:
         send_overhead: float = 0.0,
         receive_overhead: float = 0.0,
         collective_latency: float | None = None,
+        bandwidth: float | None = None,
+        serialization_bandwidth: float | None = None,
+        deserialization_bandwidth: float | None = None,
         copy_messages: bool = True,
     ) -> None:
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
@@ -251,6 +278,9 @@ class _EventEngine:
         if collective_latency is None:
             collective_latency = latency
         _validate_time("collective_latency", collective_latency)
+        _validate_rate("bandwidth", bandwidth)
+        _validate_rate("serialization_bandwidth", serialization_bandwidth)
+        _validate_rate("deserialization_bandwidth", deserialization_bandwidth)
         if not isinstance(copy_messages, bool):
             msg = "copy_messages must be a boolean"
             raise TypeError(msg)
@@ -260,7 +290,18 @@ class _EventEngine:
         self.send_overhead = float(send_overhead)
         self.receive_overhead = float(receive_overhead)
         self.collective_latency = float(collective_latency)
+        self.bandwidth = bandwidth
+        self.serialization_bandwidth = serialization_bandwidth
+        self.deserialization_bandwidth = deserialization_bandwidth
         self.copy_messages = copy_messages
+        self._measure_payloads = any(
+            rate is not None
+            for rate in (
+                bandwidth,
+                serialization_bandwidth,
+                deserialization_bandwidth,
+            )
+        )
 
         self._time = 0.0
         self._sequence = 0
@@ -269,6 +310,9 @@ class _EventEngine:
         self._results: list[Any] = []
         self._rank_times: list[float] = []
         self._rank_compute: list[float] = []
+        self._rank_python: list[float] = []
+        self._rank_communication: list[float] = []
+        self._rank_cpu_available: list[float] = []
         self._rank_compute_idle: list[float] = []
         self._rank_last_compute_finish: list[float] = []
         self._rank_has_computed: list[bool] = []
@@ -312,6 +356,8 @@ class _EventEngine:
             pending_messages=self._messages_sent - self._messages_received,
             rank_finish_seconds=tuple(self._rank_times),
             rank_compute_seconds=tuple(self._rank_compute),
+            rank_python_seconds=tuple(self._rank_python),
+            rank_communication_seconds=tuple(self._rank_communication),
             rank_compute_idle_seconds=tuple(self._rank_compute_idle),
             rank_last_compute_finish_seconds=tuple(
                 self._rank_last_compute_finish,
@@ -327,6 +373,9 @@ class _EventEngine:
         self._results = [None] * self.size
         self._rank_times = [0.0] * self.size
         self._rank_compute = [0.0] * self.size
+        self._rank_python = [0.0] * self.size
+        self._rank_communication = [0.0] * self.size
+        self._rank_cpu_available = [0.0] * self.size
         self._rank_compute_idle = [0.0] * self.size
         self._rank_last_compute_finish = [0.0] * self.size
         self._rank_has_computed = [False] * self.size
@@ -353,11 +402,40 @@ class _EventEngine:
         try:
             operation = task.send(value)
         except StopIteration as stop:
-            self._results[rank] = stop.value
-            self._tasks[rank] = None
-            self._completed += 1
+            result = stop.value
+            self._after_python(
+                rank,
+                task.python_seconds,
+                lambda: self._finish_rank(rank, result),
+            )
             return
-        self._handle(rank, operation)
+        self._after_python(
+            rank,
+            task.python_seconds,
+            lambda: self._handle(rank, operation),
+        )
+
+    def _after_python(
+        self,
+        rank: int,
+        duration: float,
+        callback: Callable[[], None],
+    ) -> None:
+        if duration <= 0.0:
+            callback()
+            return
+        start = max(self._time, self._rank_cpu_available[rank])
+        finish = start + duration
+        self._rank_python[rank] += duration
+        self._rank_cpu_available[rank] = finish
+        self._waiting[rank] = "executing Python"
+        self._schedule(finish, callback)
+
+    def _finish_rank(self, rank: int, result: Any) -> None:
+        self._rank_times[rank] = self._time
+        self._results[rank] = result
+        self._tasks[rank] = None
+        self._completed += 1
 
     def _handle(self, rank: int, operation: object) -> None:
         if isinstance(operation, _Send):
@@ -370,12 +448,14 @@ class _EventEngine:
             self._handle_test(rank, operation)
         elif isinstance(operation, _Compute):
             _validate_time("duration", operation.duration)
+            start = max(self._time, self._rank_cpu_available[rank])
             if self._rank_has_computed[rank]:
                 self._rank_compute_idle[rank] += max(
                     0.0,
-                    self._time - self._rank_last_compute_finish[rank],
+                    start - self._rank_last_compute_finish[rank],
                 )
-            finish = self._time + operation.duration
+            finish = start + operation.duration
+            self._rank_cpu_available[rank] = finish
             self._rank_compute[rank] += operation.duration
             self._rank_last_compute_finish[rank] = finish
             self._rank_has_computed[rank] = True
@@ -392,22 +472,31 @@ class _EventEngine:
     def _handle_send(self, rank: int, operation: _Send) -> None:
         self._validate_rank(operation.destination, "destination")
         _validate_tag(operation.tag)
+        value, size_bytes, pickled = self._copy_and_measure(operation.value)
         message = _Message(
             source=rank,
             destination=operation.destination,
             tag=operation.tag,
-            value=self._copy(operation.value),
+            value=value,
+            size_bytes=size_bytes,
+            pickled=pickled,
             sequence=self._sequence,
         )
-        send_done = self._time + self.send_overhead
-        arrival = send_done + self.latency
+        sender_cost = self.send_overhead + _byte_cost(
+            size_bytes,
+            self.serialization_bandwidth,
+        )
+        send_done = max(self._time, self._rank_cpu_available[rank]) + sender_cost
+        self._rank_cpu_available[rank] = send_done
+        self._rank_communication[rank] += sender_cost
+        arrival = send_done + self.latency + _byte_cost(size_bytes, self.bandwidth)
         self._messages_sent += 1
         self._schedule(arrival, lambda: self._deliver(message))
 
         if operation.nonblocking:
             request = _RequestState(rank, receive=False)
             self._schedule(send_done, lambda: self._complete_request(request, None))
-            self._schedule(self._time, lambda: self._resume(rank, request))
+            self._schedule(send_done, lambda: self._resume(rank, request))
         else:
             self._waiting[rank] = f"sending to rank {operation.destination}"
             self._schedule(send_done, lambda: self._resume(rank))
@@ -415,14 +504,18 @@ class _EventEngine:
     def _handle_receive(self, rank: int, operation: _Receive) -> None:
         self._validate_source(operation.source)
         self._validate_tag_filter(operation.tag)
-        request = _RequestState(rank, receive=True)
+        request = _RequestState(
+            rank,
+            receive=True,
+            defer_completion=operation.nonblocking,
+        )
         if operation.status is not None:
             request._completion_statuses.append(operation.status)
         self._post_receive(request, operation.source, operation.tag)
         if operation.nonblocking:
             self._schedule(self._time, lambda: self._resume(rank, request))
         else:
-            request._waiters.append((rank, None))
+            request._waiters.append((rank, None, False))
             self._waiting[rank] = (
                 f"receiving source={operation.source}, tag={operation.tag}"
             )
@@ -441,23 +534,50 @@ class _EventEngine:
             self._posted_receives[rank].append(request)
             return
         message = self._mailboxes[rank].pop(message_index)
-        self._schedule(
-            self._time + self.receive_overhead,
-            lambda: self._complete_receive(request, message),
-        )
+        self._match_receive(request, message)
 
     def _deliver(self, message: _Message) -> None:
         requests = self._posted_receives[message.destination]
         for index, request in enumerate(requests):
             if self._request_matches(request, message):
                 requests.pop(index)
-                self._schedule(
-                    self._time + self.receive_overhead,
-                    lambda request=request: self._complete_receive(request, message),
-                )
+                self._match_receive(request, message)
                 return
         self._mailboxes[message.destination].append(message)
         self._wake_matching_probes(message.destination)
+
+    def _match_receive(
+        self,
+        request: _RequestState,
+        message: _Message,
+    ) -> None:
+        request._matched_message = message
+        if not request._defer_completion:
+            self._schedule_receive_completion(request)
+
+    def _schedule_receive_completion(
+        self,
+        request: _RequestState,
+    ) -> None:
+        """Reserve receiver CPU time and schedule delivery of one message."""
+        if request._completion_scheduled:
+            return
+        message = request._matched_message
+        if message is None:
+            return
+        request._completion_scheduled = True
+        rank = request._owner
+        receiver_cost = self.receive_overhead + _byte_cost(
+            message.size_bytes,
+            self.deserialization_bandwidth,
+        )
+        completion = max(self._time, self._rank_cpu_available[rank]) + receiver_cost
+        self._rank_cpu_available[rank] = completion
+        self._rank_communication[rank] += receiver_cost
+        self._schedule(
+            completion,
+            lambda: self._complete_receive(request, message),
+        )
 
     def _complete_receive(
         self,
@@ -466,8 +586,14 @@ class _EventEngine:
     ) -> None:
         request._source = message.source
         request._tag = message.tag
+        request._matched_message = None
         self._messages_received += 1
-        self._complete_request(request, message.value)
+        value = (
+            pickle.loads(message.value)  # noqa: S301
+            if message.pickled
+            else message.value
+        )
+        self._complete_request(request, value)
 
     def _complete_request(self, request: _RequestState, value: Any) -> None:
         request._complete = True
@@ -477,9 +603,13 @@ class _EventEngine:
         for status in request._completion_statuses:
             self._update_status(request, status)
         request._completion_statuses = []
-        for rank, status in waiters:
+        for rank, status, is_test in waiters:
             self._update_status(request, status)
-            self._schedule(self._time, lambda rank=rank: self._resume(rank, value))
+            result = (True, value) if is_test else value
+            self._schedule(
+                self._time,
+                lambda rank=rank, result=result: self._resume(rank, result),
+            )
 
     def _handle_wait(self, rank: int, operation: _WaitRequest) -> None:
         request = operation.request
@@ -488,16 +618,23 @@ class _EventEngine:
             self._update_status(request, operation.status)
             self._schedule(self._time, lambda: self._resume(rank, request._value))
             return
-        request._waiters.append((rank, operation.status))
+        request._waiters.append((rank, operation.status, False))
         self._waiting[rank] = "waiting for a request"
+        self._schedule_receive_completion(request)
 
     def _handle_test(self, rank: int, operation: _TestRequest) -> None:
         request = operation.request
         self._validate_request_owner(rank, request)
         if request._complete:
             self._update_status(request, operation.status)
-        result = request._complete, request._value
-        self._schedule(self._time, lambda: self._resume(rank, result))
+            result = True, request._value
+            self._schedule(self._time, lambda: self._resume(rank, result))
+        elif request._matched_message is not None:
+            request._waiters.append((rank, operation.status, True))
+            self._waiting[rank] = "deserializing a request"
+            self._schedule_receive_completion(request)
+        else:
+            self._schedule(self._time, lambda: self._resume(rank, (False, None)))
 
     def _handle_probe(self, rank: int, operation: _Probe) -> None:
         self._validate_source(operation.source)
@@ -650,6 +787,14 @@ class _EventEngine:
     def _copy(self, value: Any) -> Any:
         return deepcopy(value) if self.copy_messages else value
 
+    def _copy_and_measure(self, value: Any) -> tuple[Any, int, bool]:
+        if not self._measure_payloads:
+            return self._copy(value), 0, False
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        if self.copy_messages:
+            return payload, len(payload), True
+        return value, len(payload), False
+
     @staticmethod
     def _validate_tag_filter(tag: int) -> None:
         if tag != ANY_TAG:
@@ -682,6 +827,21 @@ def _validate_time(name: str, value: float) -> None:
     if value < 0 or not math.isfinite(value):
         msg = f"{name} must be finite and nonnegative"
         raise ValueError(msg)
+
+
+def _validate_rate(name: str, value: float | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        msg = f"{name} must be a number or None"
+        raise TypeError(msg)
+    if value <= 0 or not math.isfinite(value):
+        msg = f"{name} must be finite and positive"
+        raise ValueError(msg)
+
+
+def _byte_cost(size_bytes: int, rate: float | None) -> float:
+    return 0.0 if rate is None else size_bytes / rate
 
 
 def _validate_tag(tag: int) -> None:

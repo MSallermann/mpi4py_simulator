@@ -75,7 +75,11 @@ result = Simulator(
     latency=2e-6,
     send_overhead=1e-6,
     receive_overhead=3e-6,
+    bandwidth=1e9,                    # bytes transferred per second
+    serialization_bandwidth=500e6,   # sender-side pickle bytes per second
+    deserialization_bandwidth=700e6, # receiver-side pickle bytes per second
     collective_latency=10e-6,
+    measure_python=True,              # include coordinator/bookkeeping execution
 ).run(virtual_rank)
 
 print(result.time)
@@ -105,10 +109,11 @@ Three boundaries still matter:
 1. **Supply the communicator.** Code that hard-codes `MPI.COMM_WORLD` inside the rank
    body must accept `comm` as an argument. The simulator does not monkey-patch
    `mpi4py` globally.
-2. **Choose what happens to computation.** Ordinary Python executes for real and
-   contributes no virtual time. That is useful for small correctness tests. At
-   10,000 ranks, inject a cheap result model and call `comm.compute(seconds)` instead
-   of running the expensive kernel 10,000 times.
+2. **Choose what happens to computation.** With `measure_python=True`, ordinary rank
+   code—including coordinator logic on rank 0—is measured automatically between MPI
+   calls. Expensive worker kernels should still be replaced by cheap result models
+   plus `comm.compute(seconds)` so a 10,000-rank simulation does not execute the real
+   kernel 10,000 times.
 3. **Stay within the supported MPI subset.** The simulator handles Python objects,
    not MPI buffers, datatypes, communicators, files, windows, or processes.
 
@@ -128,8 +133,9 @@ while workload cost and communication cost are explicit model inputs.
   corresponding `mpi4py.MPI` predefined operation; and
 - `compute(seconds)` (also named `sleep`) for instrumented virtual work.
 
-Lowercase and relevant mpi4py-capitalized aliases are accepted. Messages are deep
-copied by default to approximate mpi4py's pickle-based object communication.
+Lowercase and relevant mpi4py-capitalized aliases are accepted. Messages are copied
+by default so mutation after a send cannot change the received value. When a payload
+rate is configured, point-to-point objects are pickled to determine their byte size.
 
 `Request.waitall(requests)` is also available as ``MPI.Request.Waitall(requests)`` on
 the small namespace exported by this package. Applications that keep an MPI module in
@@ -142,14 +148,55 @@ Only one rank executes at a time. When it reaches a simulated operation, control
 returns to a deterministic event loop. The event loop advances to the next virtual
 event and resumes the affected rank.
 
-- `send` consumes `send_overhead`; its message arrives after `latency`.
-- A matched `recv` consumes `receive_overhead`.
+- `send` consumes sender CPU time; its message then travels independently.
+- A matched `recv` consumes receiver CPU time before the value becomes available.
 - `compute(duration)` suspends that rank for the given virtual duration.
 - A collective completes `collective_latency` after its last rank arrives.
 - A blocked set of ranks with no event that can wake them raises `DeadlockError`.
 
 Buffered-send semantics are assumed: a send need not wait for its matching receive.
-The event ordering is deterministic for deterministic application code and inputs.
+The event ordering is deterministic for deterministic application code and inputs
+when automatic Python timing is disabled.
+
+### Point-to-point cost model
+
+For a message whose pickled representation has `n` bytes, the model uses:
+
+```text
+sender CPU = send_overhead + n / serialization_bandwidth
+transport  = latency       + n / bandwidth
+receiver CPU = receive_overhead + n / deserialization_bandwidth
+```
+
+An omitted bandwidth removes that term. Sender and receiver CPU time cannot overlap
+other modeled CPU work on the same rank; transport can overlap computation and other
+messages. This means dispatch and result processing on rank 0 are included when they
+occur through communicator calls. With `measure_python=True`, ordinary scheduling
+code between those calls is measured and charged automatically as well.
+
+For `irecv()`, transport can finish in the background, but receiver CPU time is paid
+when `wait()` or `test()` materializes the Python object. This lets computation overlap
+the network without also making Python deserialization happen in the background.
+
+Byte rates are calibration inputs, not measurements taken while the simulation runs.
+The real time spent pickling or copying objects affects only how long the simulator
+command takes. It is not added to the simulated runtime.
+
+### Accounting for coordinator work
+
+Set `measure_python=True` once on `Simulator`; no source annotations are required.
+Each time a rank runs between communicator calls, only that rank's Python execution
+slice is timed and added to its simulated clock. Time in the event loop and in other
+virtual ranks is outside the measurement.
+
+This naturally accounts for rank-zero queue management, worker selection, task
+construction, and result processing. It also measures lightweight worker-side Python
+bookkeeping. The measured values are available in
+`result.stats.rank_python_seconds`.
+
+Automatic measurement depends on the current machine, Python interpreter, system
+load, and simulator-call overhead. Leave it disabled and use calibrated
+`comm.compute(seconds)` durations when exact reproducibility matters.
 
 ## Interpreting the result
 
@@ -160,15 +207,18 @@ The event ordering is deterministic for deterministic application code and input
 | `rank_results[rank]` | Return value of that rank's function. |
 | `time` / `stats.time` | Simulated runtime: the time when the final rank finishes. |
 | `stats.rank_finish_seconds` | Virtual finish time of each rank. |
-| `stats.rank_compute_seconds` | Total duration passed to `compute()` by each rank. |
+| `stats.rank_compute_seconds` | Explicit modeled computation charged with `compute()`. |
+| `stats.rank_python_seconds` | Automatically measured rank-code execution. |
+| `stats.rank_communication_seconds` | Sender/receiver CPU cost charged to each rank. |
 | `stats.rank_compute_idle_seconds` | Gaps between a rank's modeled compute calls. |
 | `stats.rank_last_compute_finish_seconds` | End of each rank's final modeled computation. |
 | `stats.messages_sent` | Point-to-point messages posted. |
 | `stats.messages_received` | Point-to-point receives completed. |
 | `stats.pending_messages` | Messages left unmatched when all rank functions returned. |
 
-The Python command's wall-clock duration measures simulator overhead. It says nothing
-about the modeled MPI program. `result.time` is the modeled duration.
+The Python command's total wall-clock duration is not the modeled runtime. With
+`measure_python=True`, measured per-rank execution slices contribute to `result.time`,
+but event-loop overhead, message copying, and other simulator work do not.
 
 For comparisons, keep the workload and calibration fixed and vary one scheduling
 choice at a time. Useful signals include:
@@ -200,7 +250,8 @@ inside the one simulator process; it does not create threads or child processes.
 ## Limitations
 
 - No real parallel execution, CPU contention, OS scheduling, or shared-memory races.
-- No payload-dependent bandwidth, congestion, network topology, or rank locality.
+- Optional payload-dependent transfer and serialization costs, but no congestion,
+  network topology, link sharing, or rank locality.
 - No eager/rendezvous transition, finite MPI buffering, or send backpressure.
 - Python object messages only; no buffer API, counts, or MPI datatypes.
 - One world communicator; no communicator splitting, groups, or virtual topologies.
@@ -211,11 +262,12 @@ inside the one simulator process; it does not create threads or child processes.
   function or another rank-local object.
 - The greenlet stack for every virtual rank uses memory, so memory use grows with the
   configured rank count.
-- Real computation is neither timed nor parallelized automatically. Instrument it
-  explicitly with `compute()` when virtual timing matters.
+- Python execution can be timed automatically, but still runs sequentially in the
+  simulator process. Replace expensive kernels with `compute()` for large rank
+  counts.
 
-Deep copy resembles object serialization but is not identical to pickle. Collectives
-use one fixed latency rather than a tree or ring algorithm. See the
+Collectives use one fixed latency rather than a payload-dependent tree or ring
+algorithm. See the
 [limitations guide](docs/src/limitations.rst) and
 [timing/calibration guide](docs/src/calibration.rst) before treating the output as a
 performance prediction.

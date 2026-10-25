@@ -20,9 +20,10 @@ Communication model
 
 * Messages are Python objects, not MPI buffers.
 * Datatypes, element counts, ``Get_count``, and memory layouts are not checked.
-* ``deepcopy`` approximates object serialization but is not identical to pickle.
-* Payload-dependent time, bandwidth, congestion, topology, and rank locality are not
-  modeled.
+* Point-to-point byte rates use the size of Python's pickled representation. They do
+  not model MPI buffer datatypes or zero-copy transfers.
+* Payload-dependent point-to-point time can be configured, but congestion, topology,
+  shared links, and rank locality are not modeled.
 * Sends are buffered. Eager limits, rendezvous handshakes, finite buffers, and
   blocking-send backpressure are absent.
 * Process failure, message corruption, cancellation, and nondeterministic runtime
@@ -44,9 +45,13 @@ Communicators and operations
 Timing accuracy
 ---------------
 
-* Timing costs are fixed constants rather than payload- or topology-dependent models.
+* Point-to-point costs can depend on payload size, but configured byte rates are
+  fixed and independent of topology or concurrent traffic.
 * Collectives use one cost after the last arrival rather than simulating an algorithm.
-* Python rank-function execution and object copying do not advance virtual time.
+* Python rank-function execution advances simulated time only when
+  ``measure_python=True``. Measurements include simulator-call overhead and are host-
+  and load-dependent, so they are not deterministic.
+* The simulator's actual pickle and copy operations do not advance simulated time.
 * Uncalibrated virtual time is suitable for relative experiments, not prediction.
 
 Scaling consequences

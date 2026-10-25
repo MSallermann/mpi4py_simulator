@@ -79,13 +79,18 @@ Real Python work versus virtual work
 ------------------------------------
 
 The simulator actually calls ``rank_main`` for every rank. Normal Python statements
-therefore run sequentially in wall-clock time. They add no virtual duration because
-the simulator cannot know what the same work would cost on 10,000 real CPUs.
+therefore run sequentially in wall-clock time. By default they add no virtual
+duration. With ``measure_python=True``, each rank's execution between communicator
+calls is measured and charged to that rank's simulated clock.
 
 For a small functional test, running the real Python kernel may be useful. For a large
 timing test, inject a cheap work model that returns the value needed by later control
 flow and calls ``comm.compute(measured_seconds)``. This skips real waiting while
 occupying only that rank on the virtual timeline.
+
+Automatic Python timing is useful for lightweight coordinator and bookkeeping code
+that must execute. It is not a way to make expensive kernels scale: those kernels are
+still executed sequentially once per virtual rank.
 
 One programming model
 ---------------------

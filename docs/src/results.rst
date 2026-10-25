@@ -4,8 +4,9 @@ Interpreting results
 Always distinguish virtual time from wall-clock time:
 
 * **Virtual time** is produced by the model and is used for scheduling comparisons.
-* **Wall-clock time** is how long Python took to execute the simulation and measures
-  only simulator efficiency.
+* **Wall-clock time** is how long Python took to execute the simulation. It is an
+  operational cost, not the simulated application runtime. When automatic Python
+  timing is enabled, selected slices of this execution feed the virtual model.
 
 Rank results
 ------------
@@ -23,7 +24,16 @@ Rank results
    Virtual time at which each rank function returned.
 
 ``stats.rank_compute_seconds``
-   Duration passed to ``compute`` by each rank.
+   Explicit modeled computation charged through ``compute`` by each rank.
+
+``stats.rank_python_seconds``
+   Ordinary rank-function execution measured automatically between communicator
+   calls. It is zero when ``measure_python=False``.
+
+``stats.rank_communication_seconds``
+   Sender and receiver CPU time charged to each rank. It includes fixed point-to-
+   point overhead plus configured serialization and deserialization time, but not
+   network transit or collective delay.
 
 ``stats.rank_compute_idle_seconds``
    Gaps between a rank's modeled compute calls, excluding its initial wait.
@@ -51,6 +61,12 @@ Find the last finishing rank with:
 The last rank is not automatically the root cause of a bottleneck. It may be waiting
 on an earlier slow rank. Change one timing parameter at a time or inspect intermediate
 protocol phases before attributing causality.
+
+Rank zero is included in every per-rank tuple and in the overall runtime. Its
+communicator costs and explicit ``compute`` calls are therefore modeled. Set
+``measure_python=True`` to also charge its ordinary Python coordinator logic
+automatically; otherwise that code has zero simulated duration unless represented by
+``comm.compute(seconds)``.
 
 A nonzero pending message count can be intentional for fire-and-forget traffic, but
 usually deserves investigation for a missing receive or premature return.

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
+import mpi4py_simulator.simulator as simulator_module
 from mpi4py_simulator import (
     ANY_SOURCE,
     MAX,
@@ -164,3 +167,132 @@ def test_ten_thousand_rank_smoke_test() -> None:
 
     assert len(result.rank_results) == 10_000
     assert result.rank_results[-1] == 9_999
+
+
+def test_payload_costs_charge_sender_network_and_receiver() -> None:
+    value = {"payload": "x" * 100}
+    size = len(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+
+    def program(comm: Comm) -> object:
+        if comm.rank == 0:
+            comm.send(value, dest=1)
+            return None
+        return comm.recv(source=0)
+
+    result = Simulator(
+        2,
+        latency=1.0,
+        send_overhead=0.5,
+        receive_overhead=0.25,
+        bandwidth=size / 2,
+        serialization_bandwidth=size / 3,
+        deserialization_bandwidth=size / 4,
+    ).run(program)
+
+    assert result.rank_results == (None, value)
+    assert result.stats.rank_finish_seconds == pytest.approx((3.5, 10.75))
+    assert result.stats.rank_communication_seconds == pytest.approx((3.5, 4.25))
+    assert result.time == pytest.approx(10.75)
+
+
+def test_nonblocking_send_serialization_is_serial_per_rank() -> None:
+    value = "payload"
+    size = len(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+
+    def program(comm: Comm) -> object:
+        if comm.rank == 0:
+            requests = [comm.isend(value, dest=1) for _ in range(2)]
+            MPI.Request.Waitall(requests)
+            return None
+        return [comm.recv(source=0) for _ in range(2)]
+
+    result = Simulator(2, serialization_bandwidth=size).run(program)
+
+    assert result.rank_results == (None, [value, value])
+    assert result.stats.rank_finish_seconds == pytest.approx((2.0, 2.0))
+    assert result.stats.rank_communication_seconds == pytest.approx((2.0, 0.0))
+
+
+def test_nonblocking_receive_deserialization_waits_for_rank_cpu() -> None:
+    value = "payload"
+    size = len(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+
+    def program(comm: Comm) -> object:
+        if comm.rank == 0:
+            comm.send(value, dest=1)
+            return None
+        request = comm.irecv(source=0)
+        comm.compute(5.0)
+        return request.wait()
+
+    result = Simulator(2, deserialization_bandwidth=size / 2).run(program)
+
+    assert result.rank_results == (None, value)
+    assert result.stats.rank_finish_seconds == pytest.approx((0.0, 7.0))
+    assert result.stats.rank_compute_seconds == pytest.approx((0.0, 5.0))
+    assert result.stats.rank_communication_seconds == pytest.approx((0.0, 2.0))
+
+
+def test_rank_zero_pays_fan_in_deserialization_costs_serially() -> None:
+    value = "result"
+    size = len(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+
+    def program(comm: Comm) -> object:
+        if comm.rank == 0:
+            return [comm.recv(source=ANY_SOURCE) for _ in range(comm.size - 1)]
+        comm.send(value, dest=0)
+        return None
+
+    result = Simulator(3, deserialization_bandwidth=size).run(program)
+
+    assert result.rank_results[0] == [value, value]
+    assert result.stats.rank_communication_seconds == pytest.approx((2.0, 0.0, 0.0))
+    assert result.time == pytest.approx(2.0)
+
+
+def test_python_work_can_be_measured_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((10.0, 10.25, 20.0, 20.0))
+    monkeypatch.setattr(simulator_module, "perf_counter", lambda: next(ticks))
+
+    def program(comm: Comm) -> int:
+        if comm.rank == 0:
+            return 42
+        return 0
+
+    result = Simulator(2, measure_python=True).run(program)
+
+    assert result.rank_results == (42, 0)
+    assert result.stats.rank_python_seconds == pytest.approx((0.25, 0.0))
+    assert result.stats.rank_compute_seconds == pytest.approx((0.0, 0.0))
+    assert result.stats.rank_finish_seconds == pytest.approx((0.25, 0.0))
+
+
+def test_measured_python_slices_accumulate_across_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((10.0, 10.25, 20.0, 20.5))
+    monkeypatch.setattr(simulator_module, "perf_counter", lambda: next(ticks))
+
+    def program(comm: Comm) -> str:
+        comm.compute(1.0)
+        return "done"
+
+    result = Simulator(1, measure_python=True).run(program)
+
+    assert result.rank_results == ("done",)
+    assert result.stats.rank_python_seconds == pytest.approx((0.75,))
+    assert result.stats.rank_compute_seconds == pytest.approx((1.0,))
+    assert result.stats.rank_finish_seconds == pytest.approx((1.75,))
+
+
+def test_measure_python_must_be_boolean() -> None:
+    with pytest.raises(TypeError, match="measure_python"):
+        Simulator(1, measure_python=1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("rate", [0.0, -1.0, float("inf"), float("nan")])
+def test_invalid_bandwidth_is_rejected(rate: float) -> None:
+    with pytest.raises(ValueError, match="bandwidth"):
+        Simulator(2, bandwidth=rate)
