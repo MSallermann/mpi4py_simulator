@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mpi4py-simulator"
+version = "0.1.0"
+description = "Run existing blocking MPI-style rank code in one simulated process."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Moritz Sallermann"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+dependencies = ["greenlet>=3"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+docs = ["sphinx>=7", "furo", "sphinx-autobuild"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.pyright]
+reportMissingModuleSource = false
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN401",  # MPI messages may be arbitrary Python objects.
+    "COM812",  # Conflicts with the formatter.
+    "D203",    # Prefer no blank line after class docstrings.
+    "D213",    # Prefer the summary on the first docstring line.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"example.py" = ["C901", "D212", "T201"]
+"examples/*" = ["INP001", "N802", "T201", "TC003"]
+"src/mpi4py_simulator/simulator.py" = ["D105", "D107", "PLR0913", "SLF001"]
+"docs/src/conf.py" = ["INP001"]
+"src/mpi4py_simulator/_engine.py" = [
+    "C901",
+    "D107",
+    "FBT003",
+    "PLR0911",
+    "PLR0913",
+    "SLF001",
+    "TRY301",
+]
+"tests/*" = ["ARG005", "D100", "D103", "INP001", "PLR2004", "S101"]
