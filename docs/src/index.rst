@@ -26,6 +26,5 @@ cluster-performance predictor.
    blocking
    results
    calibration
-   chemfit
    limitations
    api

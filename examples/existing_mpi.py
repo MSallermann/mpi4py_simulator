@@ -62,7 +62,7 @@ def run_virtual(size: int) -> None:
 
     result = Simulator(size, latency=2e-6).run(virtual_rank)
     print(f"virtual ranks: {size}")
-    print(f"virtual makespan: {result.time:.6f} s")
+    print(f"simulated runtime: {result.time:.6f} s")
     print(f"messages: {result.stats.messages_sent}")
     print(f"first results: {result.rank_results[0][:3]}")
 

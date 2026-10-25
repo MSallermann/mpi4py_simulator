@@ -25,8 +25,7 @@ The simulator helps answer questions about application control flow:
 
 * Does the real source/tag protocol complete or deadlock at a larger rank count?
 * Are messages left unmatched when rank functions return?
-* How do batching, refill, and load-balancing choices affect a simplified virtual
-  makespan?
+* How do batching, refill, and load-balancing choices affect the simulated runtime?
 * Which ranks finish last under supplied computation and communication costs?
 * Does a scheduling regression reproduce deterministically in a small CI job?
 

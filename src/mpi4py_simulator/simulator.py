@@ -776,7 +776,7 @@ class _MPINamespace:
         This deliberately small namespace is not a replacement for the complete
         ``mpi4py.MPI`` module. It is useful when a dependency already accepts a
         simulated communicator but obtains status or request helpers from a module-
-        level MPI object, as ChemFit does during scheduler shutdown.
+        level MPI object.
 
     """
 

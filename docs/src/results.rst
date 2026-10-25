@@ -16,7 +16,8 @@ Rank results
    Tuple indexed by rank containing each rank function's return value.
 
 ``time`` / ``stats.time``
-   Makespan, defined as the latest rank finish time.
+   Simulated runtime, defined as the time when the final rank finishes. This is also
+   called the *makespan* in scheduling literature.
 
 ``stats.rank_finish_seconds``
    Virtual time at which each rank function returned.
@@ -38,7 +39,7 @@ Rank results
    Sent point-to-point messages not received when all programs returned.
 
 Collectives do not increment point-to-point counters. Their costs appear in rank
-finish times and makespan.
+finish times and the simulated runtime.
 
 Find the last finishing rank with:
 
@@ -59,17 +60,17 @@ For a worker subset, useful derived metrics are:
 .. code-block:: python
 
    worker_ranks = range(1, size)
-   makespan = result.time
+   runtime = result.time
    busy = sum(result.stats.rank_compute_seconds[rank] for rank in worker_ranks)
-   utilization = busy / ((size - 1) * makespan)
+   utilization = busy / ((size - 1) * runtime)
    tail_idle = sum(
-       makespan - result.stats.rank_last_compute_finish_seconds[rank]
+       runtime - result.stats.rank_last_compute_finish_seconds[rank]
        for rank in worker_ranks
    )
-   throughput = completed_tasks / makespan
+   throughput = completed_tasks / runtime
 
 Utilization is modeled worker occupancy, not real CPU utilization. An unused worker
-has a last-compute finish of zero and contributes the full makespan to tail idle.
+has a last-compute finish of zero and contributes the full runtime to tail idle.
 
 Comparing simulations
 ---------------------
@@ -79,17 +80,7 @@ For a fair policy comparison:
 * use identical task durations and random seeds;
 * use the same latency and overhead assumptions;
 * compare virtual metrics, never simulator wall time;
-* inspect both makespan and idle-time decomposition; and
+* inspect both simulated runtime and idle-time decomposition; and
 * sweep uncertain inputs rather than reporting one overly precise value.
 
 Small changes below the uncertainty of the timing inputs are not meaningful.
-
-ChemFit example
----------------
-
-The bundled ChemFit example reports the number of completed evaluations, simulated
-runtime, and modeled worker utilization. ``result.time`` is called the makespan in
-scheduling terminology, but the example uses the plainer output label. Utilization
-is the sum of worker
-``compute`` durations divided by ``workers * makespan``. It measures occupancy in the
-configured model, not CPU utilization observed by the operating system.

@@ -133,8 +133,7 @@ copied by default to approximate mpi4py's pickle-based object communication.
 
 `Request.waitall(requests)` is also available as ``MPI.Request.Waitall(requests)`` on
 the small namespace exported by this package. Applications that keep an MPI module in
-a dependency can inject that namespace for virtual runs; the
-[ChemFit example](example.py) shows the one-line adaptation.
+a dependency can inject that namespace for virtual runs.
 
 ## What the simulator actually does
 
@@ -159,7 +158,7 @@ The event ordering is deterministic for deterministic application code and input
 | Field | Meaning |
 | --- | --- |
 | `rank_results[rank]` | Return value of that rank's function. |
-| `time` / `stats.time` | Virtual makespan: the latest rank finish. |
+| `time` / `stats.time` | Simulated runtime: the time when the final rank finishes. |
 | `stats.rank_finish_seconds` | Virtual finish time of each rank. |
 | `stats.rank_compute_seconds` | Total duration passed to `compute()` by each rank. |
 | `stats.rank_compute_idle_seconds` | Gaps between a rank's modeled compute calls. |
@@ -174,7 +173,7 @@ about the modeled MPI program. `result.time` is the modeled duration.
 For comparisons, keep the workload and calibration fixed and vary one scheduling
 choice at a time. Useful signals include:
 
-- a lower makespan means the modeled critical path became shorter;
+- a lower simulated runtime means the modeled critical path became shorter;
 - a wide spread in rank finish times suggests imbalance or a long queue-draining
   tail;
 - unexpected pending messages usually mean a missing receive or a fire-and-forget
@@ -183,9 +182,9 @@ choice at a time. Useful signals include:
   event able to make progress; and
 - correct `rank_results` show functional behavior only within the modeled MPI subset.
 
-Collectives are reflected in makespan and rank finish times, not in the point-to-point
-message counters. Compare multiple calibrated scenarios; do not read more precision
-from an absolute time than the timing model contains.
+Collectives are reflected in simulated runtime and rank finish times, not in the
+point-to-point message counters. Compare multiple calibrated scenarios; do not read
+more precision from an absolute time than the timing model contains.
 
 ## Installation
 
@@ -224,7 +223,7 @@ performance prediction.
 ## Documentation
 
 The full documentation includes the existing-code walkthrough, API-specific guides,
-result interpretation, calibration, the ChemFit scheduling example, and limitations.
+result interpretation, calibration, and limitations.
 
 ```bash
 python -m pip install -e '.[docs]'
@@ -232,7 +231,7 @@ python -m pip install -e '.[docs]'
 ```
 
 Run `./build_docs.sh` without an argument to execute documentation tests and start a
-live-reloading documentation server, following ChemFit's documentation workflow.
+live-reloading documentation server.
 
 ## Development
 
