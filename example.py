@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 import chemfit
@@ -24,7 +25,9 @@ def rank_main(comm: Comm, tasks: int, task_seconds: float) -> list[Any] | None:
         comm.compute(task_seconds)
         return value * value
 
-    scheduler = MPIGraphScheduler(comm=comm)
+    scheduler = MPIGraphScheduler(
+        comm=comm, max_tasks_per_message=128, target_batches_per_worker=1
+    )
     with scheduler.prepare(square) as schedule:
         if comm.rank != 0:
             schedule.worker_loop()
@@ -50,7 +53,7 @@ def main() -> None:
     args = parser.parse_args()
 
     simulation = Simulator(
-        size=16,
+        size=args.workers + 1,
         latency=1.4106714e-06,
         send_overhead=0,
         receive_overhead=5.62192819e-06,
@@ -72,6 +75,9 @@ def main() -> None:
         f"measured rank-0 Python: {result.stats.rank_python_seconds[0]:.6f} s",
     )
     print(f"modeled worker utilization: {utilization:.1%}")
+
+    with Path("results.json").open("w") as f:
+        f.write(result.stats.to_json())
 
 
 if __name__ == "__main__":

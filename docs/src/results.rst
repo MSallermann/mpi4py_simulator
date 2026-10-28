@@ -71,6 +71,62 @@ automatically; otherwise that code has zero simulated duration unless represente
 A nonzero pending message count can be intentional for fire-and-forget traffic, but
 usually deserves investigation for a missing receive or premature return.
 
+Saving statistics
+-----------------
+
+``SimulationStats`` has a versioned JSON format for saving results or passing them to
+analysis tools. It includes all aggregate and per-rank statistics, but deliberately
+excludes ``rank_results`` because those application-defined values may not be JSON
+serializable.
+
+.. code-block:: python
+
+   from pathlib import Path
+
+   from mpi4py_simulator import SimulationStats
+
+
+   Path("simulation-stats.json").write_text(
+       result.stats.to_json(indent=2),
+       encoding="utf-8",
+   )
+   restored = SimulationStats.from_json(
+       Path("simulation-stats.json").read_text(encoding="utf-8"),
+   )
+
+The top-level JSON object contains ``format: "mpi4py-simulator.stats"``, an integer
+``version``, and a ``stats`` object. Version 1 uses the public statistics attribute
+names as keys and represents each per-rank tuple as a JSON array in rank order.
+``to_dict`` and ``from_dict`` expose the same structure without JSON encoding.
+Loaders reject unknown versions, missing or extra fields, invalid numeric values, and
+per-rank arrays with inconsistent lengths rather than silently misinterpreting data.
+
+Visualizing statistics
+----------------------
+
+The package includes a dependency-free SVG renderer. Give it a saved statistics
+document and an output path:
+
+.. code-block:: console
+
+   mpi4py-simulator-visualize simulation-stats.json --output simulation-stats.svg
+
+The equivalent module command works without installing the console entry point:
+
+.. code-block:: console
+
+   python -m mpi4py_simulator.visualization simulation-stats.json \
+       --output simulation-stats.svg --max-ranks 64
+
+Each horizontal rank bar decomposes its finish time into explicit modeled compute,
+automatically measured Python, communication CPU, and ``Waiting / other``. The last
+category is derived rather than traced: it can include blocking waits, transport,
+collectives, and idle time. For simulations larger than ``--max-ranks``, the chart
+keeps rank zero and the slowest-finishing ranks.
+
+Use :func:`mpi4py_simulator.visualization.render_stats_svg` to generate the same
+standalone SVG in Python.
+
 For a worker subset, useful derived metrics are:
 
 .. code-block:: python

@@ -24,6 +24,7 @@ cluster-performance predictor.
 
    overview
    blocking
+   comparison
    results
    calibration
    limitations

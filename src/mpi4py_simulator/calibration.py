@@ -6,7 +6,7 @@ import argparse
 import json
 import math
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -205,7 +205,7 @@ def calibrate(
     return outcome
 
 
-def _raise_calibration_failure(message: str) -> Never:
+def _raise_calibration_failure(message: str) -> NoReturn:
     msg = f"calibration failed: {message}"
     raise RuntimeError(msg)
 

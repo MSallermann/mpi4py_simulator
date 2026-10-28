@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import heapq
+import json
 import math
 import operator
 import pickle
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
@@ -79,6 +80,32 @@ PROD = Reduction("PROD", operator.mul)
 MIN = Reduction("MIN", min)
 MAX = Reduction("MAX", max)
 
+_STATS_FORMAT = "mpi4py-simulator.stats"
+_STATS_FORMAT_VERSION = 1
+_STATS_DOCUMENT_FIELDS = frozenset({"format", "version", "stats"})
+_STATS_VALUE_FIELDS = frozenset(
+    {
+        "time",
+        "messages_sent",
+        "messages_received",
+        "pending_messages",
+        "rank_finish_seconds",
+        "rank_compute_seconds",
+        "rank_python_seconds",
+        "rank_communication_seconds",
+        "rank_compute_idle_seconds",
+        "rank_last_compute_finish_seconds",
+    },
+)
+_STATS_RANK_FIELDS = (
+    "rank_finish_seconds",
+    "rank_compute_seconds",
+    "rank_python_seconds",
+    "rank_communication_seconds",
+    "rank_compute_idle_seconds",
+    "rank_last_compute_finish_seconds",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SimulationStats:
@@ -120,6 +147,208 @@ class SimulationStats:
     rank_communication_seconds: tuple[float, ...]
     rank_compute_idle_seconds: tuple[float, ...]
     rank_last_compute_finish_seconds: tuple[float, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the versioned, JSON-compatible statistics document.
+
+        Returns:
+            A new dictionary containing the format identifier, format version, and
+            every statistics field. Per-rank tuples are represented as lists.
+
+        Notes:
+            The format deliberately excludes :attr:`SimulationResult.rank_results`,
+            whose application-defined values may not be JSON serializable.
+
+        """
+        return {
+            "format": _STATS_FORMAT,
+            "version": _STATS_FORMAT_VERSION,
+            "stats": {
+                "time": self.time,
+                "messages_sent": self.messages_sent,
+                "messages_received": self.messages_received,
+                "pending_messages": self.pending_messages,
+                "rank_finish_seconds": list(self.rank_finish_seconds),
+                "rank_compute_seconds": list(self.rank_compute_seconds),
+                "rank_python_seconds": list(self.rank_python_seconds),
+                "rank_communication_seconds": list(
+                    self.rank_communication_seconds,
+                ),
+                "rank_compute_idle_seconds": list(self.rank_compute_idle_seconds),
+                "rank_last_compute_finish_seconds": list(
+                    self.rank_last_compute_finish_seconds,
+                ),
+            },
+        }
+
+    def to_json(self, *, indent: int | None = None) -> str:
+        """Serialize these statistics to versioned JSON.
+
+        Args:
+            indent: Optional indentation passed to :func:`json.dumps`. ``None``
+                produces compact JSON; a value such as ``2`` produces readable
+                output.
+
+        Returns:
+            A JSON string accepted by :meth:`from_json`.
+
+        Raises:
+            ValueError: If a manually constructed instance contains NaN or infinity,
+                which JSON cannot represent portably.
+
+        """
+        return json.dumps(self.to_dict(), indent=indent, allow_nan=False)
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, object]) -> SimulationStats:
+        """Restore statistics from a versioned dictionary.
+
+        Args:
+            document: Mapping produced by :meth:`to_dict` or an equivalent decoded
+                JSON document.
+
+        Returns:
+            An immutable :class:`SimulationStats` instance.
+
+        Raises:
+            TypeError: If the document or one of its values has the wrong type.
+            ValueError: If the format, version, fields, lengths, or numeric values
+                are invalid.
+
+        """
+        if not isinstance(document, Mapping):
+            msg = "statistics document must be a mapping"
+            raise TypeError(msg)
+
+        _validate_stats_fields(
+            set(document),
+            _STATS_DOCUMENT_FIELDS,
+            "statistics document",
+        )
+
+        format_name = document.get("format")
+        if format_name != _STATS_FORMAT:
+            msg = f"unsupported statistics format: {format_name!r}"
+            raise ValueError(msg)
+
+        version = document.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            msg = "statistics format version must be an integer"
+            raise TypeError(msg)
+        if version != _STATS_FORMAT_VERSION:
+            msg = f"unsupported statistics format version: {version}"
+            raise ValueError(msg)
+
+        values = document.get("stats")
+        if not isinstance(values, Mapping):
+            msg = "statistics document must contain a 'stats' mapping"
+            raise TypeError(msg)
+        _validate_stats_fields(set(values), _STATS_VALUE_FIELDS, "statistics")
+
+        rank_values = {
+            name: _deserialize_stats_times(name, values[name])
+            for name in _STATS_RANK_FIELDS
+        }
+        rank_counts = {len(items) for items in rank_values.values()}
+        if len(rank_counts) != 1:
+            msg = "per-rank statistics fields must have equal lengths"
+            raise ValueError(msg)
+        if rank_counts == {0}:
+            msg = "per-rank statistics fields must contain at least one rank"
+            raise ValueError(msg)
+
+        return cls(
+            time=_deserialize_stats_time("time", values["time"]),
+            messages_sent=_deserialize_stats_count(
+                "messages_sent",
+                values["messages_sent"],
+            ),
+            messages_received=_deserialize_stats_count(
+                "messages_received",
+                values["messages_received"],
+            ),
+            pending_messages=_deserialize_stats_count(
+                "pending_messages",
+                values["pending_messages"],
+            ),
+            rank_finish_seconds=rank_values["rank_finish_seconds"],
+            rank_compute_seconds=rank_values["rank_compute_seconds"],
+            rank_python_seconds=rank_values["rank_python_seconds"],
+            rank_communication_seconds=rank_values["rank_communication_seconds"],
+            rank_compute_idle_seconds=rank_values["rank_compute_idle_seconds"],
+            rank_last_compute_finish_seconds=rank_values[
+                "rank_last_compute_finish_seconds"
+            ],
+        )
+
+    @classmethod
+    def from_json(cls, document: str | bytes | bytearray) -> SimulationStats:
+        """Restore statistics from a versioned JSON document.
+
+        Args:
+            document: UTF-8 JSON text produced by :meth:`to_json`.
+
+        Returns:
+            An immutable :class:`SimulationStats` instance.
+
+        Raises:
+            json.JSONDecodeError: If ``document`` is not valid JSON.
+            TypeError: If the decoded document has invalid value types.
+            ValueError: If its format, version, fields, lengths, or values are
+                invalid.
+
+        """
+        decoded = json.loads(document)
+        if not isinstance(decoded, Mapping):
+            msg = "statistics JSON must contain an object at the top level"
+            raise TypeError(msg)
+        return cls.from_dict(cast("Mapping[str, object]", decoded))
+
+
+def _deserialize_stats_time(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        msg = f"statistics field {name!r} must be a number"
+        raise TypeError(msg)
+    result = float(value)
+    if result < 0.0 or not math.isfinite(result):
+        msg = f"statistics field {name!r} must be finite and nonnegative"
+        raise ValueError(msg)
+    return result
+
+
+def _validate_stats_fields(
+    fields: set[object],
+    expected: frozenset[str],
+    subject: str,
+) -> None:
+    missing = {field for field in expected if field not in fields}
+    unexpected = {field for field in fields if field not in expected}
+    if not missing and not unexpected:
+        return
+    details = []
+    if missing:
+        details.append(f"missing {sorted(missing)!r}")
+    if unexpected:
+        details.append(f"unexpected {sorted(map(str, unexpected))!r}")
+    msg = f"invalid {subject} fields: {', '.join(details)}"
+    raise ValueError(msg)
+
+
+def _deserialize_stats_count(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"statistics field {name!r} must be an integer"
+        raise TypeError(msg)
+    if value < 0:
+        msg = f"statistics field {name!r} must be nonnegative"
+        raise ValueError(msg)
+    return value
+
+
+def _deserialize_stats_times(name: str, value: object) -> tuple[float, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        msg = f"statistics field {name!r} must be an array"
+        raise TypeError(msg)
+    return tuple(_deserialize_stats_time(name, item) for item in value)
 
 
 @dataclass(frozen=True, slots=True)

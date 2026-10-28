@@ -16,6 +16,9 @@ classifiers = [
 ]
 dependencies = ["greenlet>=3"]
 
+[project.scripts]
+mpi4py-simulator-visualize = "mpi4py_simulator.visualization:main"
+
 [project.optional-dependencies]
 test = ["pytest>=7"]
 docs = ["sphinx>=7", "furo", "sphinx-autobuild"]

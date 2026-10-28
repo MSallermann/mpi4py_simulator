@@ -45,3 +45,8 @@ measurement workflow and interpretation guidance.
    :members:
 
 .. autoclass:: mpi4py_simulator.calibration.CalibrationSample
+
+Visualization
+-------------
+
+.. autofunction:: mpi4py_simulator.visualization.render_stats_svg

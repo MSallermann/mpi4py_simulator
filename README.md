@@ -97,6 +97,23 @@ python examples/existing_mpi.py --ranks 10001
 `size` means total ranks, just as `COMM_WORLD.Get_size()` does. Therefore 10,000
 workers plus a rank-0 coordinator means `size=10_001`.
 
+For an end-to-end validation workflow, the
+[`compare_real_and_simulated.py`](examples/compare_real_and_simulated.py) example
+calibrates a real MPI communicator, times the actual coordinator/worker program,
+runs the same rank function in the simulator, verifies its results, saves statistics,
+and reports the timing difference. The
+[worked comparison guide](docs/src/comparison.rst) gives the exact commands.
+
+[`examples/example_ring.py`](examples/example_ring.py) demonstrates a ring exchange
+using nonblocking sends and predecessor receives. Every rank's token completes one or
+more full laps, and the example verifies the recorded path:
+
+```bash
+python examples/example_ring.py --ranks 8 --laps 2 \
+  --hop-us 5 --stats ring-stats.json
+mpi4py-simulator-visualize ring-stats.json -o ring-stats.svg
+```
+
 ## What is reused and what must be adapted?
 
 The application keeps its rank branches, loops, message values, sources, tags,
@@ -249,6 +266,23 @@ load, and simulator-call overhead. Leave it disabled and use calibrated
 | `stats.messages_sent` | Point-to-point messages posted. |
 | `stats.messages_received` | Point-to-point receives completed. |
 | `stats.pending_messages` | Messages left unmatched when all rank functions returned. |
+
+Statistics have a versioned JSON representation for storage and analysis:
+
+```python
+payload = result.stats.to_json(indent=2)
+restored = SimulationStats.from_json(payload)
+```
+
+Import `SimulationStats` from `mpi4py_simulator`. The format includes all statistics
+but not application-defined `rank_results`; see the
+[results guide](docs/src/results.rst) for its schema and validation behavior.
+
+Turn a saved document into a standalone SVG without additional dependencies:
+
+```bash
+mpi4py-simulator-visualize simulation-stats.json -o simulation-stats.svg
+```
 
 The Python command's total wall-clock duration is not the modeled runtime. With
 `measure_python=True`, measured per-rank execution slices contribute to `result.time`,
