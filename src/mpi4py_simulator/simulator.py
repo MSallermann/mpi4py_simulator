@@ -440,6 +440,38 @@ class Comm:
         """
         self.barrier()
 
+    def reset_measurement(self) -> None:
+        """Synchronize all ranks and discard statistics collected so far.
+
+        After every rank reaches this operation, reported simulation time starts at
+        zero and the per-rank compute, measured-Python, communication, idle-time, and
+        last-compute fields are reset. Point-to-point message counters also restart.
+        The synchronization and its ``collective_latency`` are excluded from the new
+        interval.
+
+        Communicator state is preserved: queued messages and nonblocking requests
+        remain valid, and rank programs continue normally. Message counters include
+        only messages posted after the most recent reset. Complete setup exchanges
+        before calling this method when their later delivery or completion should not
+        delay the measured phase.
+
+        All ranks must call this method in the same collective sequence. It may be
+        called repeatedly; :class:`SimulationResult` reports only the interval after
+        the final call.
+
+        Raises:
+            DeadlockError: Indirectly from :meth:`Simulator.run` if another rank
+                never reaches the boundary.
+            ValueError: If ranks enter different collective operations at this
+                sequence position.
+
+        """
+        self._collective("reset_measurement")
+
+    def ResetMeasurement(self) -> None:  # noqa: N802
+        """Reset statistics using a capitalized MPI-style method name."""
+        self.reset_measurement()
+
     def bcast(self, value: Any = None, root: int = 0) -> Any:
         """Return the root rank's value on every rank.
 

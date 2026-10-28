@@ -1,5 +1,7 @@
 """Shared MPI constants and status metadata."""
 
+# Valid ranks and message tags are nonnegative, so -1 is an unambiguous wildcard.
+# These values also match mpi4py's usual ANY_SOURCE and ANY_TAG representation.
 ANY_SOURCE = -1
 ANY_TAG = -1
 
@@ -19,6 +21,7 @@ class Status:
 
     def __init__(self) -> None:
         """Initialize an empty status."""
+        # Wildcards make an untouched status recognizable without another flag.
         self._source = ANY_SOURCE
         self._tag = ANY_TAG
 
@@ -58,6 +61,8 @@ class Status:
                 when they populate a user-provided status object.
 
         """
+        # Keep mpi4py's mutating API so engine helpers can populate either status
+        # implementation through the same small interface.
         self._source = source
 
     def Set_tag(self, tag: int) -> None:  # noqa: N802

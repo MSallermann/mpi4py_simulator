@@ -110,13 +110,43 @@ and should be replaced with cheap models plus ``comm.compute`` at large rank cou
 Because measurements depend on the host and current load, leave the option disabled
 and use calibrated explicit durations for reproducible comparisons.
 
+Excluding setup from measurement
+--------------------------------
+
+Call ``reset_measurement`` collectively after initialization to make the remainder of
+the run the reported measurement interval:
+
+.. code-block:: python
+
+   def rank_main(comm):
+       configuration = comm.bcast(load_configuration() if comm.rank == 0 else None)
+       build_rank_local_state(configuration)
+
+       comm.reset_measurement()
+
+       run_timed_protocol(comm)
+
+The call behaves like a barrier, but its wait and configured ``collective_latency``
+are excluded. Once every rank reaches it, simulated time restarts at zero; per-rank
+compute, measured-Python, communication, idle, and last-compute statistics restart;
+and point-to-point counters include only messages posted afterward. Return values and
+communicator state are preserved. ``ResetMeasurement`` is the equivalent capitalized
+alias.
+
+All ranks must call the boundary in the same collective order. Complete setup
+communications before it when possible. Queued messages and outstanding requests
+remain valid, so waiting for an old operation after the reset can still delay the
+measured phase even though its message is excluded from the new counters. Repeated
+calls are allowed; the result describes only the interval after the final reset.
+
 Supported calls
 ---------------
 
 ``Comm`` supports object ``send``, ``recv``, ``isend``, ``irecv``, ``probe``,
 and ``iprobe``; sources, tags, wildcards, and statuses; barriers and the common object
-collectives; and reductions using the built-in simulator operations, two-argument
-callables, or mpi4py's predefined ``SUM``, ``PROD``, ``MIN``, and ``MAX`` operations.
+collectives; the collective ``reset_measurement`` boundary; and reductions using the
+built-in simulator operations, two-argument callables, or mpi4py's predefined
+``SUM``, ``PROD``, ``MIN``, and ``MAX`` operations.
 
 Requests provide ``wait``/``Wait`` and ``test``/``Test``. Use ``Request.waitall`` or
 ``Comm.waitall`` for a group of requests. The package's small ``MPI`` namespace also

@@ -148,7 +148,8 @@ while workload cost and communication cost are explicit model inputs.
 - `barrier`, `bcast`, `scatter`, `gather`, `allgather`, and `alltoall`;
 - `reduce` and `allreduce` with `SUM`, `PROD`, `MIN`, `MAX`, a callable, or the
   corresponding `mpi4py.MPI` predefined operation; and
-- `compute(seconds)` (also named `sleep`) for instrumented virtual work.
+- `compute(seconds)` (also named `sleep`) for instrumented virtual work; and
+- `reset_measurement()` for a collective post-setup measurement boundary.
 
 Lowercase and relevant mpi4py-capitalized aliases are accepted. Messages are copied
 by default so mutation after a send cannot change the received value. When a payload
@@ -248,6 +249,13 @@ bookkeeping. The measured values are available in
 Automatic measurement depends on the current machine, Python interpreter, system
 load, and simulator-call overhead. Leave it disabled and use calibrated
 `comm.compute(seconds)` durations when exact reproducibility matters.
+
+To exclude initialization, every rank can call `comm.reset_measurement()` after
+setup. It acts as a collective boundary and restarts reported time, per-rank timing,
+and message counters without discarding communicator state. Its own synchronization
+cost is excluded; the final result describes only the interval after the last reset.
+Complete setup communication first when possible, because outstanding setup work can
+still delay code after the boundary.
 
 ## Interpreting the result
 

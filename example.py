@@ -26,9 +26,11 @@ def rank_main(comm: Comm, tasks: int, task_seconds: float) -> list[Any] | None:
         return value * value
 
     scheduler = MPIGraphScheduler(
-        comm=comm, max_tasks_per_message=128, target_batches_per_worker=1
+        comm=comm, max_tasks_per_message=1, target_batches_per_worker=1
     )
     with scheduler.prepare(square) as schedule:
+        comm.reset_measurement()
+
         if comm.rank != 0:
             schedule.worker_loop()
             return None
@@ -48,7 +50,7 @@ def main() -> None:
     """Run the example and report modeled work and measured coordinator work."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workers", type=int, default=64)
-    parser.add_argument("--tasks", type=int, default=1_024)
+    parser.add_argument("--tasks", type=int, default=10_024)
     parser.add_argument("--task-ms", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -63,6 +65,7 @@ def main() -> None:
         deserialization_bandwidth=2.26584621e10,
         measure_python=True,
     )
+
     result = simulation.run(
         lambda comm: rank_main(comm, args.tasks, args.task_ms / 1_000),
     )

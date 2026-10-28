@@ -442,6 +442,8 @@ class _RequestState:
     ) -> None:
         self._owner = owner
         self._receive = receive
+        # irecv may match on the network while deferring receiver CPU cost and
+        # object materialization until the application calls wait or test.
         self._defer_completion = defer_completion
         self._complete = False
         self._completion_scheduled = False
@@ -449,6 +451,8 @@ class _RequestState:
         self._matched_message: _Message | None = None
         self._source = ANY_SOURCE
         self._tag = ANY_TAG
+        # The boolean distinguishes test waiters, which resume with (True, value),
+        # from wait waiters, which resume with the value directly.
         self._waiters: list[tuple[int, Status | None, bool]] = []
         self._completion_statuses: list[Status] = []
 
@@ -460,6 +464,7 @@ class _RequestState:
 
 @dataclass(order=True, slots=True)
 class _ScheduledAction:
+    # sequence is the deterministic tie-breaker for actions at the same virtual time.
     time: float
     sequence: int
     callback: Callable[[], None] = field(compare=False, repr=False)
@@ -474,6 +479,8 @@ class _Message:
     size_bytes: int
     pickled: bool
     sequence: int
+    # Counters ignore messages posted before the most recent measurement reset.
+    measurement_generation: int
 
 
 @dataclass(slots=True)
@@ -532,6 +539,8 @@ class _EventEngine:
             )
         )
 
+        # The engine clock and CPU-availability clocks remain absolute throughout a
+        # run. A measurement reset moves only the reporting origin and accumulators.
         self._time = 0.0
         self._sequence = 0
         self._actions: list[_ScheduledAction] = []
@@ -552,6 +561,8 @@ class _EventEngine:
         self._collectives: dict[int, _CollectiveState] = {}
         self._messages_sent = 0
         self._messages_received = 0
+        self._measurement_start = 0.0
+        self._measurement_generation = 0
         self._completed = 0
 
     def run(self, create_task: Callable[[int], _Task]) -> SimulationResult:
@@ -571,6 +582,8 @@ class _EventEngine:
                     )
                     msg = f"virtual MPI deadlock ({blocked})"
                     raise DeadlockError(msg)
+                # Advancing directly to the next action avoids real waiting and is
+                # what allows thousands of virtual ranks to share one interpreter.
                 action = heapq.heappop(self._actions)
                 self._time = action.time
                 action.callback()
@@ -578,19 +591,30 @@ class _EventEngine:
             self._close_tasks()
             raise
 
+        # Internal timestamps stay absolute so queued pre-reset events remain valid;
+        # only the result is translated to the latest measurement boundary.
+        rank_finish_seconds = tuple(
+            max(0.0, finish - self._measurement_start) for finish in self._rank_times
+        )
+        rank_last_compute_finish_seconds = tuple(
+            max(0.0, finish - self._measurement_start) if has_computed else 0.0
+            for finish, has_computed in zip(
+                self._rank_last_compute_finish,
+                self._rank_has_computed,
+                strict=True,
+            )
+        )
         stats = SimulationStats(
-            time=max(self._rank_times, default=0.0),
+            time=max(rank_finish_seconds, default=0.0),
             messages_sent=self._messages_sent,
             messages_received=self._messages_received,
             pending_messages=self._messages_sent - self._messages_received,
-            rank_finish_seconds=tuple(self._rank_times),
+            rank_finish_seconds=rank_finish_seconds,
             rank_compute_seconds=tuple(self._rank_compute),
             rank_python_seconds=tuple(self._rank_python),
             rank_communication_seconds=tuple(self._rank_communication),
             rank_compute_idle_seconds=tuple(self._rank_compute_idle),
-            rank_last_compute_finish_seconds=tuple(
-                self._rank_last_compute_finish,
-            ),
+            rank_last_compute_finish_seconds=rank_last_compute_finish_seconds,
         )
         return SimulationResult(tuple(self._results), stats)
 
@@ -615,9 +639,27 @@ class _EventEngine:
         self._collectives = {}
         self._messages_sent = 0
         self._messages_received = 0
+        self._measurement_start = 0.0
+        self._measurement_generation = 0
         self._completed = 0
 
+    def _reset_measurement(self) -> None:
+        """Start a fresh statistics interval at the current absolute time."""
+        # Do not rewind _time, rank CPU clocks, mailboxes, requests, or event-queue
+        # entries. Rewinding them would invalidate outstanding setup communication.
+        self._measurement_start = self._time
+        self._measurement_generation += 1
+        self._rank_compute = [0.0] * self.size
+        self._rank_python = [0.0] * self.size
+        self._rank_communication = [0.0] * self.size
+        self._rank_compute_idle = [0.0] * self.size
+        self._rank_last_compute_finish = [0.0] * self.size
+        self._rank_has_computed = [False] * self.size
+        self._messages_sent = 0
+        self._messages_received = 0
+
     def _schedule(self, time: float, callback: Callable[[], None]) -> None:
+        # Monotonic sequence numbers make simultaneous events reproducible.
         action = _ScheduledAction(time, self._sequence, callback)
         self._sequence += 1
         heapq.heappush(self._actions, action)
@@ -629,6 +671,8 @@ class _EventEngine:
         self._rank_times[rank] = self._time
         self._waiting[rank] = None
         try:
+            # A task runs until its next communicator call switches back to the
+            # engine, or until the rank function returns.
             operation = task.send(value)
         except StopIteration as stop:
             result = stop.value
@@ -653,6 +697,8 @@ class _EventEngine:
         if duration <= 0.0:
             callback()
             return
+        # Measured Python and modeled communication share the rank's single CPU
+        # timeline, so neither can overlap another CPU cost on that rank.
         start = max(self._time, self._rank_cpu_available[rank])
         finish = start + duration
         self._rank_python[rank] += duration
@@ -678,6 +724,8 @@ class _EventEngine:
         elif isinstance(operation, _Compute):
             _validate_time("duration", operation.duration)
             start = max(self._time, self._rank_cpu_available[rank])
+            # Idle time intentionally starts only after the first measured compute;
+            # setup and initial scheduling delay are not worker tail-idle time.
             if self._rank_has_computed[rank]:
                 self._rank_compute_idle[rank] += max(
                     0.0,
@@ -710,6 +758,7 @@ class _EventEngine:
             size_bytes=size_bytes,
             pickled=pickled,
             sequence=self._sequence,
+            measurement_generation=self._measurement_generation,
         )
         sender_cost = self.send_overhead + _byte_cost(
             size_bytes,
@@ -718,12 +767,15 @@ class _EventEngine:
         send_done = max(self._time, self._rank_cpu_available[rank]) + sender_cost
         self._rank_cpu_available[rank] = send_done
         self._rank_communication[rank] += sender_cost
+        # Local posting/serialization occupies the sender first. Network transport
+        # begins afterward and may overlap later work on either rank.
         arrival = send_done + self.latency + _byte_cost(size_bytes, self.bandwidth)
         self._messages_sent += 1
         self._schedule(arrival, lambda: self._deliver(message))
 
         if operation.nonblocking:
             request = _RequestState(rank, receive=False)
+            # isend returns after local posting cost, not after network arrival.
             self._schedule(send_done, lambda: self._complete_request(request, None))
             self._schedule(send_done, lambda: self._resume(rank, request))
         else:
@@ -756,6 +808,8 @@ class _EventEngine:
         tag: int,
     ) -> None:
         rank = request._owner
+        # Prefer an already-arrived message; otherwise retain the receive in posting
+        # order so later deliveries implement MPI-style first-match behavior.
         message_index = self._find_message(rank, source, tag)
         request._source = source
         request._tag = tag
@@ -767,6 +821,8 @@ class _EventEngine:
 
     def _deliver(self, message: _Message) -> None:
         requests = self._posted_receives[message.destination]
+        # The oldest compatible posted receive wins. An unmatched message moves to
+        # the mailbox and remains available to recv, irecv, and probe.
         for index, request in enumerate(requests):
             if self._request_matches(request, message):
                 requests.pop(index)
@@ -781,6 +837,8 @@ class _EventEngine:
         message: _Message,
     ) -> None:
         request._matched_message = message
+        # Blocking recv materializes immediately. irecv records the match but leaves
+        # deserialization on the application rank until wait/test observes it.
         if not request._defer_completion:
             self._schedule_receive_completion(request)
 
@@ -800,6 +858,8 @@ class _EventEngine:
             message.size_bytes,
             self.deserialization_bandwidth,
         )
+        # Receiver overhead is CPU work, so multiple arrivals cannot deserialize in
+        # parallel on the same rank.
         completion = max(self._time, self._rank_cpu_available[rank]) + receiver_cost
         self._rank_cpu_available[rank] = completion
         self._rank_communication[rank] += receiver_cost
@@ -816,7 +876,10 @@ class _EventEngine:
         request._source = message.source
         request._tag = message.tag
         request._matched_message = None
-        self._messages_received += 1
+        # A setup message remains usable after reset, but belongs to the generation
+        # in which it was posted and therefore does not affect the new counters.
+        if message.measurement_generation == self._measurement_generation:
+            self._messages_received += 1
         value = (
             pickle.loads(message.value)  # noqa: S301
             if message.pickled
@@ -829,6 +892,8 @@ class _EventEngine:
         request._value = value
         waiters = request._waiters
         request._waiters = []
+        # Status objects supplied to irecv are populated even when a later wait/test
+        # supplies no separate status object.
         for status in request._completion_statuses:
             self._update_status(request, status)
         request._completion_statuses = []
@@ -859,6 +924,7 @@ class _EventEngine:
             result = True, request._value
             self._schedule(self._time, lambda: self._resume(rank, result))
         elif request._matched_message is not None:
+            # A matched irecv still owes its receiver CPU/deserialization cost.
             request._waiters.append((rank, operation.status, True))
             self._waiting[rank] = "deserializing a request"
             self._schedule_receive_completion(request)
@@ -871,6 +937,7 @@ class _EventEngine:
         index = self._find_message(rank, operation.source, operation.tag)
         if index is not None:
             message = self._mailboxes[rank][index]
+            # Probe observes metadata without removing the message from the mailbox.
             _set_status(operation.status, message.source, message.tag)
             self._schedule(self._time, lambda: self._resume(rank, True))
         elif operation.blocking:
@@ -912,6 +979,10 @@ class _EventEngine:
 
         results = self._collective_results(state)
         completion = self._time + self.collective_latency
+        if operation.kind == "reset_measurement":
+            # Schedule the reset before rank resumes at the same timestamp so the
+            # boundary's collective latency and pre-boundary Python slices vanish.
+            self._schedule(completion, self._reset_measurement)
         for result_rank, result in enumerate(results):
             self._schedule(
                 completion,
@@ -921,9 +992,13 @@ class _EventEngine:
 
     def _collective_results(self, state: _CollectiveState) -> list[Any]:
         operation = state.operation
+        # Rank ordering is explicit here so gathers and reductions are deterministic
+        # even though participants may reach the collective in another order.
         values = [state.participants[rank] for rank in range(self.size)]
         root = operation.root
         if operation.kind == "barrier":
+            return [None] * self.size
+        if operation.kind == "reset_measurement":
             return [None] * self.size
         if operation.kind == "bcast":
             value = values[cast("int", root)]
@@ -978,6 +1053,8 @@ class _EventEngine:
             raise ValueError(msg)
 
     def _find_message(self, rank: int, source: int, tag: int) -> int | None:
+        # Mailboxes preserve arrival order; wildcard receives therefore select the
+        # earliest arrived compatible message.
         for index, message in enumerate(self._mailboxes[rank]):
             if source in (ANY_SOURCE, message.source) and tag in (ANY_TAG, message.tag):
                 return index
@@ -1018,9 +1095,12 @@ class _EventEngine:
 
     def _copy_and_measure(self, value: Any) -> tuple[Any, int, bool]:
         if not self._measure_payloads:
+            # Avoid pickle overhead when no configured timing term needs byte size.
             return self._copy(value), 0, False
         payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
         if self.copy_messages:
+            # Reusing the serialized bytes supplies send-time copy semantics and
+            # avoids performing both deepcopy and pickle for the same message.
             return payload, len(payload), True
         return value, len(payload), False
 
@@ -1037,6 +1117,8 @@ class _EventEngine:
 
 def _set_status(status: Status | None, source: int, tag: int) -> None:
     if status is not None:
+        # Use mpi4py's public mutators so both the simulator Status and a real
+        # mpi4py.MPI.Status supplied by shared application code are supported.
         status.Set_source(source)
         status.Set_tag(tag)
 

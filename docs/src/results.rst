@@ -51,6 +51,10 @@ Rank results
 Collectives do not increment point-to-point counters. Their costs appear in rank
 finish times and the simulated runtime.
 
+If the rank program calls :meth:`~mpi4py_simulator.Comm.reset_measurement`, all times
+and counters are relative to the final reset boundary rather than simulation startup.
+See :doc:`blocking` for its collective semantics and setup-message behavior.
+
 Find the last finishing rank with:
 
 .. code-block:: python

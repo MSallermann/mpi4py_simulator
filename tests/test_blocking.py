@@ -116,6 +116,73 @@ def test_collectives_and_virtual_compute() -> None:
     assert result.stats.rank_compute_seconds == (4.0, 3.0, 2.0, 1.0)
 
 
+def test_measurement_can_exclude_collective_setup() -> None:
+    def program(comm: Comm) -> None:
+        comm.compute(float(10 + comm.rank))
+        comm.reset_measurement()
+        comm.compute(float(comm.rank + 1))
+
+    result = Simulator(2, collective_latency=0.5).run(program)
+
+    assert result.time == pytest.approx(2.0)
+    assert result.stats.rank_finish_seconds == pytest.approx((1.0, 2.0))
+    assert result.stats.rank_compute_seconds == pytest.approx((1.0, 2.0))
+    assert result.stats.rank_compute_idle_seconds == pytest.approx((0.0, 0.0))
+    assert result.stats.rank_last_compute_finish_seconds == pytest.approx((1.0, 2.0))
+
+
+def test_measurement_reset_restarts_message_counters() -> None:
+    def program(comm: Comm) -> object:
+        if comm.rank == 0:
+            comm.send("setup", dest=1)
+        else:
+            assert comm.recv(source=0) == "setup"
+
+        comm.ResetMeasurement()
+
+        if comm.rank == 0:
+            comm.send("measured", dest=1)
+            return None
+        return comm.recv(source=0)
+
+    result = Simulator(2).run(program)
+
+    assert result.rank_results == (None, "measured")
+    assert result.stats.messages_sent == 1
+    assert result.stats.messages_received == 1
+    assert result.stats.pending_messages == 0
+
+
+def test_measurement_reset_preserves_in_flight_setup_messages() -> None:
+    def program(comm: Comm) -> object:
+        if comm.rank == 0:
+            comm.isend("setup", dest=1)
+        comm.reset_measurement()
+        return comm.recv(source=0) if comm.rank == 1 else None
+
+    result = Simulator(2, latency=1.0, collective_latency=0.25).run(program)
+
+    assert result.rank_results == (None, "setup")
+    assert result.time == pytest.approx(0.75)
+    assert result.stats.messages_sent == 0
+    assert result.stats.messages_received == 0
+    assert result.stats.pending_messages == 0
+
+
+def test_only_final_measurement_interval_is_reported() -> None:
+    def program(comm: Comm) -> None:
+        comm.compute(1.0)
+        comm.reset_measurement()
+        comm.compute(2.0)
+        comm.reset_measurement()
+        comm.compute(3.0)
+
+    result = Simulator(2).run(program)
+
+    assert result.time == pytest.approx(3.0)
+    assert result.stats.rank_compute_seconds == pytest.approx((3.0, 3.0))
+
+
 def test_scatter_allgather_alltoall_and_reductions() -> None:
     def program(comm: Comm) -> object:
         scattered = comm.scatter([10, 20, 30] if comm.rank == 0 else None)
@@ -285,6 +352,24 @@ def test_measured_python_slices_accumulate_across_operations(
     assert result.stats.rank_python_seconds == pytest.approx((0.75,))
     assert result.stats.rank_compute_seconds == pytest.approx((1.0,))
     assert result.stats.rank_finish_seconds == pytest.approx((1.75,))
+
+
+def test_measurement_reset_excludes_measured_setup_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter((10.0, 15.0, 20.0, 22.0))
+    monkeypatch.setattr(simulator_module, "perf_counter", lambda: next(ticks))
+
+    def program(comm: Comm) -> str:
+        comm.reset_measurement()
+        return "measured"
+
+    result = Simulator(1, measure_python=True).run(program)
+
+    assert result.rank_results == ("measured",)
+    assert result.time == pytest.approx(2.0)
+    assert result.stats.rank_python_seconds == pytest.approx((2.0,))
+    assert result.stats.rank_finish_seconds == pytest.approx((2.0,))
 
 
 def test_measure_python_must_be_boolean() -> None:

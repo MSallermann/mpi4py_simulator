@@ -127,6 +127,5 @@ def main() -> None:
         print(f"wrote statistics to {args.stats}")
 
 
-
 if __name__ == "__main__":
     main()
