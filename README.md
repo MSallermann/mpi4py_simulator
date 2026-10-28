@@ -239,8 +239,8 @@ before extrapolating. See the
 
 Set `measure_python=True` once on `Simulator`; no source annotations are required.
 Each time a rank runs between communicator calls, only that rank's Python execution
-slice is timed and added to its simulated clock. Time in the event loop and in other
-virtual ranks is outside the measurement.
+slice is timed and added to its simulated clock. Time in the event loop, greenlet
+context switches, and other virtual ranks is outside the measurement.
 
 This naturally accounts for rank-zero queue management, worker selection, task
 construction, and result processing. It also measures lightweight worker-side Python
@@ -302,8 +302,9 @@ compute calls, and time after its last compute call. These intervals can contain
 measured Python or communication work; the saved statistics are aggregates, not a
 chronological trace. When the simulation used `trace=True`, switch to **Event
 timeline** for rank-local compute, Python, communication, wait, and collective
-intervals. Tracing is disabled by default because memory and JSON size grow with the
-number of simulated operations.
+intervals. The timeline's buttons or mouse wheel zoom its shared time axis; drag any
+rank track to pan all ranks together. Tracing is disabled by default because memory
+and JSON size grow with the number of simulated operations.
 
 The Python command's total wall-clock duration is not the modeled runtime. With
 `measure_python=True`, measured per-rank execution slices contribute to `result.time`,

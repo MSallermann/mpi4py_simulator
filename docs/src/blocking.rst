@@ -102,8 +102,9 @@ automatic Python timing once on the simulator:
 
 No rank-function changes are needed. The simulator measures each uninterrupted slice
 of rank Python between communicator calls. A rank's event-loop waiting and execution
-of other virtual ranks are not included. Rank-zero scheduling therefore contributes
-to its finish time while preserving the existing MPI control flow.
+of other virtual ranks are not included, nor is the greenlet context switch that
+returns control to the event engine. Rank-zero scheduling therefore contributes to
+its finish time while preserving the existing MPI control flow.
 
 The measurement applies to all ranks. Expensive worker kernels still execute for real
 and should be replaced with cheap models plus ``comm.compute`` at large rank counts.

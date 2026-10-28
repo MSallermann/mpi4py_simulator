@@ -259,6 +259,30 @@ input, select {
   padding: 7px 9px;
   font: inherit;
 }
+.zoom-controls {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+  margin-left: auto;
+}
+.zoom-controls[hidden] { display: none; }
+.zoom-controls button {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: white;
+  color: var(--ink);
+  padding: 7px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.zoom-controls button:hover:not(:disabled) { background: #f8fafc; }
+.zoom-controls button:disabled { color: var(--muted); cursor: default; opacity: 0.55; }
+.zoom-window {
+  min-width: 145px;
+  color: var(--muted);
+  font: 11px ui-monospace, monospace;
+  text-align: right;
+}
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -307,6 +331,8 @@ input, select {
     linear-gradient(90deg, transparent 74.8%, var(--line) 75%, transparent 75.2%),
     #f8fafc;
 }
+.track.timeline { cursor: grab; touch-action: none; }
+.track.timeline:active { cursor: grabbing; }
 .fill { display: flex; height: 100%; min-width: 1px; }
 .segment { height: 100%; min-width: 0; }
 .compute { background: var(--compute); }
@@ -379,6 +405,12 @@ input, select {
           <option value="aggregate">Aggregate composition</option>
           <option value="timeline">Event timeline</option>
         </select></label>
+        <div class="zoom-controls" id="zoom-controls" hidden>
+          <button type="button" id="zoom-out" title="Zoom out">&minus;</button>
+          <button type="button" id="zoom-in" title="Zoom in">+</button>
+          <button type="button" id="zoom-reset">Reset zoom</button>
+          <span class="zoom-window" id="zoom-window"></span>
+        </div>
       </div>
       <div class="legend" id="legend" aria-label="Timing categories"></div>
       <p class="view-note" id="view-note"></p>
@@ -411,6 +443,11 @@ const traceCategories = [
 const traceLabels = Object.fromEntries(traceCategories);
 const maxDetailEvents = 250;
 let selectedRank = report.ranks.length ? report.ranks[0].rank : null;
+let timelineStart = 0;
+let timelineEnd = report.time;
+let panState = null;
+let suppressRankSelection = false;
+const minimumTimelineSpan = report.time > 0 ? report.time / 1e6 : 0;
 
 function duration(value) {
   if (value === 0) return "0 s";
@@ -454,17 +491,74 @@ function renderSummary() {
     timelineOption.disabled = true;
     timelineOption.textContent = "Event timeline (trace unavailable)";
   }
-  const ticks = document.getElementById("ticks");
-  for (const fraction of [0, 0.25, 0.5, 0.75, 1]) {
-    const tick = document.createElement("span");
-    tick.textContent = duration(report.time * fraction);
-    ticks.append(tick);
-  }
   const omitted = report.rank_count - report.displayed_rank_count;
   document.getElementById("omitted").textContent = omitted
     ? `Rank 0 and the ${report.displayed_rank_count - 1} slowest ranks are ` +
       `included; ${omitted} omitted.`
     : "";
+}
+
+function timelineActive() {
+  return document.getElementById("view").value === "timeline";
+}
+
+function renderTicks() {
+  const ticks = document.getElementById("ticks");
+  ticks.replaceChildren();
+  const start = timelineActive() ? timelineStart : 0;
+  const finish = timelineActive() ? timelineEnd : report.time;
+  for (const fraction of [0, 0.25, 0.5, 0.75, 1]) {
+    const tick = document.createElement("span");
+    tick.textContent = duration(start + (finish - start) * fraction);
+    ticks.append(tick);
+  }
+}
+
+function updateZoomControls() {
+  const controls = document.getElementById("zoom-controls");
+  controls.hidden = !timelineActive();
+  const span = timelineEnd - timelineStart;
+  const tolerance = report.time * 1e-12;
+  document.getElementById("zoom-in").disabled =
+    report.time <= 0 || span <= minimumTimelineSpan + tolerance;
+  document.getElementById("zoom-out").disabled =
+    report.time <= 0 || span >= report.time - tolerance;
+  document.getElementById("zoom-reset").disabled =
+    report.time <= 0 || span >= report.time - tolerance;
+  document.getElementById("zoom-window").textContent =
+    `${duration(timelineStart)} to ${duration(timelineEnd)}`;
+}
+
+function setTimelineWindow(start, finish) {
+  if (report.time <= 0) {
+    timelineStart = 0;
+    timelineEnd = 0;
+  } else {
+    const span = Math.min(
+      report.time,
+      Math.max(minimumTimelineSpan, finish - start),
+    );
+    timelineStart = Math.max(0, Math.min(start, report.time - span));
+    timelineEnd = timelineStart + span;
+  }
+  renderTicks();
+  updateZoomControls();
+  renderRows();
+}
+
+function zoomTimeline(factor, anchorFraction = 0.5) {
+  const span = timelineEnd - timelineStart;
+  if (report.time <= 0 || span <= 0) return;
+  const fraction = Math.max(0, Math.min(1, anchorFraction));
+  const nextSpan = Math.max(
+    minimumTimelineSpan,
+    Math.min(report.time, span * factor),
+  );
+  const anchor = timelineStart + span * fraction;
+  setTimelineWindow(
+    anchor - nextSpan * fraction,
+    anchor + nextSpan * (1 - fraction),
+  );
 }
 
 function renderLegend() {
@@ -481,9 +575,9 @@ function renderLegend() {
     legend.append(item);
   }
   document.getElementById("view-note").textContent =
-    document.getElementById("view").value === "timeline"
-      ? "Blank regions have no retained interval; unmeasured Python and " +
-        "zero-duration operations do not create events."
+    timelineActive()
+      ? "Use +/- or the mouse wheel to zoom; drag the timeline to pan. " +
+        "Blank regions have no retained interval."
       : "Composition segments are totals, not chronological positions.";
 }
 
@@ -524,20 +618,29 @@ function renderRows() {
     row.type = "button";
     row.className = `rank-row${rank.rank === selectedRank ? " selected" : ""}`;
     row.setAttribute("aria-label", `Show details for rank ${rank.rank}`);
-    row.addEventListener("click", () => selectRank(rank.rank));
+    row.addEventListener("click", () => {
+      if (!suppressRankSelection) selectRank(rank.rank);
+    });
 
     const name = document.createElement("span");
     name.className = "rank-name";
     name.textContent = String(rank.rank);
     const track = document.createElement("span");
     track.className = "track";
-    if (document.getElementById("view").value === "timeline") {
+    if (timelineActive()) {
+      track.classList.add("timeline");
+      const visibleSpan = timelineEnd - timelineStart;
       for (const event of rank.events) {
+        const visibleStart = Math.max(event.start, timelineStart);
+        const visibleFinish = Math.min(event.finish, timelineEnd);
+        if (visibleFinish <= visibleStart) continue;
         const segment = document.createElement("span");
         segment.className = `trace-event ${event.kind}`;
-        segment.style.left = `${report.time ? 100 * event.start / report.time : 0}%`;
-        segment.style.width = report.time
-          ? `${100 * (event.finish - event.start) / report.time}%`
+        segment.style.left = visibleSpan
+          ? `${100 * (visibleStart - timelineStart) / visibleSpan}%`
+          : "0%";
+        segment.style.width = visibleSpan
+          ? `${100 * (visibleFinish - visibleStart) / visibleSpan}%`
           : "0%";
         segment.title =
           `${traceLabels[event.kind]}: ${event.detail} · ` +
@@ -649,10 +752,76 @@ document.getElementById("filter").addEventListener("input", renderRows);
 document.getElementById("sort").addEventListener("change", renderRows);
 document.getElementById("view").addEventListener("change", () => {
   renderLegend();
+  renderTicks();
+  updateZoomControls();
   renderRows();
 });
+document.getElementById("zoom-in").addEventListener("click", () => {
+  zoomTimeline(0.5);
+});
+document.getElementById("zoom-out").addEventListener("click", () => {
+  zoomTimeline(2);
+});
+document.getElementById("zoom-reset").addEventListener("click", () => {
+  setTimelineWindow(0, report.time);
+});
+
+const rowsElement = document.getElementById("rows");
+rowsElement.addEventListener("wheel", event => {
+  if (!timelineActive()) return;
+  const track = event.target.closest(".track.timeline");
+  if (!track) return;
+  event.preventDefault();
+  const bounds = track.getBoundingClientRect();
+  const anchor = bounds.width ? (event.clientX - bounds.left) / bounds.width : 0.5;
+  zoomTimeline(Math.exp(event.deltaY * 0.0015), anchor);
+}, {passive: false});
+
+rowsElement.addEventListener("pointerdown", event => {
+  if (!timelineActive() || event.button !== 0) return;
+  const track = event.target.closest(".track.timeline");
+  if (!track) return;
+  const bounds = track.getBoundingClientRect();
+  panState = {
+    pointerId: event.pointerId,
+    lastX: event.clientX,
+    width: bounds.width,
+    moved: false,
+  };
+  rowsElement.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+rowsElement.addEventListener("pointermove", event => {
+  if (!panState || event.pointerId !== panState.pointerId) return;
+  const delta = event.clientX - panState.lastX;
+  panState.lastX = event.clientX;
+  if (!delta || !panState.width) return;
+  panState.moved = true;
+  const span = timelineEnd - timelineStart;
+  const shift = -delta * span / panState.width;
+  setTimelineWindow(timelineStart + shift, timelineEnd + shift);
+});
+
+function finishPan(event) {
+  if (!panState || event.pointerId !== panState.pointerId) return;
+  const moved = panState.moved;
+  panState = null;
+  if (rowsElement.hasPointerCapture(event.pointerId)) {
+    rowsElement.releasePointerCapture(event.pointerId);
+  }
+  if (moved) {
+    suppressRankSelection = true;
+    window.setTimeout(() => { suppressRankSelection = false; }, 0);
+  }
+}
+
+rowsElement.addEventListener("pointerup", finishPan);
+rowsElement.addEventListener("pointercancel", finishPan);
 renderSummary();
 renderLegend();
+renderTicks();
+updateZoomControls();
 renderRows();
 if (report.ranks.length) renderDetails(report.ranks[0]);
 </script>

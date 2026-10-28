@@ -654,27 +654,46 @@ class _RankTask(_Task):
         *,
         measure_python: bool,
     ) -> None:
-        self._greenlet = greenlet(lambda: program(comm))
+        self._greenlet = greenlet(lambda: self._run(program, comm))
+        # _suspend uses the current greenlet to stop timing before control returns
+        # to the engine. Keeping the association on the greenlet avoids global
+        # rank state and remains correct for nested or concurrent simulators.
+        self._greenlet._mpi4py_simulator_task = self  # type: ignore[attr-defined]
         self._started = False
         self._measure_python = measure_python
         self._python_seconds = 0.0
+        self._python_started: float | None = None
 
     @property
     def python_seconds(self) -> float:
         return self._python_seconds
 
-    def send(self, value: Any, /) -> object:
-        started = perf_counter() if self._measure_python else 0.0
+    def _run(self, program: RankProgram, comm: Comm) -> Any:
+        # Start and stop inside the rank greenlet. Timing around greenlet.switch()
+        # would incorrectly charge context-switch bookkeeping to rank Python.
+        self._resume_python_measurement()
         try:
-            if self._started:
-                result = self._greenlet.switch(value)
-            else:
-                self._started = True
-                result = self._greenlet.switch()
+            return program(comm)
         finally:
-            self._python_seconds = (
-                perf_counter() - started if self._measure_python else 0.0
-            )
+            self._pause_python_measurement()
+
+    def _resume_python_measurement(self) -> None:
+        self._python_seconds = 0.0
+        if self._measure_python:
+            self._python_started = perf_counter()
+
+    def _pause_python_measurement(self) -> None:
+        started = self._python_started
+        if started is not None:
+            self._python_seconds = perf_counter() - started
+            self._python_started = None
+
+    def send(self, value: Any, /) -> object:
+        if self._started:
+            result = self._greenlet.switch(value)
+        else:
+            self._started = True
+            result = self._greenlet.switch()
         if self._greenlet.dead:
             raise StopIteration(result)
         return result
@@ -848,7 +867,14 @@ def _suspend(operation: object) -> Any:
     if current.parent is None:
         msg = "blocking communicator methods must be called inside a simulation"
         raise RuntimeError(msg)
-    return current.parent.switch(operation)
+    task = getattr(current, "_mpi4py_simulator_task", None)
+    if not isinstance(task, _RankTask):
+        return current.parent.switch(operation)
+    task._pause_python_measurement()
+    try:
+        return current.parent.switch(operation)
+    finally:
+        task._resume_python_measurement()
 
 
 def _coerce_reduction(

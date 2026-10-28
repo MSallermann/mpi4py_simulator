@@ -25,20 +25,27 @@ def rank_main(comm: Comm, tasks: int, task_seconds: float) -> list[Any] | None:
         comm.compute(task_seconds)
         return value * value
 
+    # These synthetic tasks all have equal cost, so one batch per worker avoids
+    # coordinator round trips without sacrificing load balance.
     scheduler = MPIGraphScheduler(
-        comm=comm, max_tasks_per_message=1, target_batches_per_worker=1
+        comm=comm,
+        max_tasks_per_message=128,
+        target_batches_per_worker=1,
     )
     with scheduler.prepare(square) as schedule:
+        requests = (
+            [
+                chemfit.EvaluationRequest(value, chemfit.EvaluateContext())
+                for value in range(tasks)
+            ]
+            if comm.rank == 0
+            else []
+        )
         comm.reset_measurement()
 
         if comm.rank != 0:
             schedule.worker_loop()
             return None
-
-        requests = [
-            chemfit.EvaluationRequest(value, chemfit.EvaluateContext())
-            for value in range(tasks)
-        ]
 
         completed = sorted(
             schedule.evaluate_many(requests), key=lambda item: item.index
@@ -64,6 +71,7 @@ def main() -> None:
         serialization_bandwidth=1.13014049e09,
         deserialization_bandwidth=2.26584621e10,
         measure_python=True,
+        trace=True,
     )
 
     result = simulation.run(

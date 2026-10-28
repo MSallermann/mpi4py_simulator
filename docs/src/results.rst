@@ -152,12 +152,14 @@ view:
 
 The timeline places compute, automatically measured Python, local communication CPU,
 blocking wait, and collective intervals at their actual virtual start and finish
-times. Hover an interval for its operation and exact timestamps, or select the rank
-to inspect its event list. Tracing is opt-in because its memory use and serialized
-file size grow with the number of simulated operations. A measurement reset discards
-events before the final boundary along with the aggregate counters. Blank timeline
-regions mean that no duration-bearing event was retained; unmeasured Python and
-zero-duration communicator operations do not produce intervals.
+times. Use the buttons or mouse wheel to zoom around the pointer, and drag any rank
+track to pan the shared time window for every rank. Hover an interval for its
+operation and exact timestamps, or select the rank to inspect its event list. Tracing
+is opt-in because its memory use and serialized file size grow with the number of
+simulated operations. A measurement reset discards events before the final boundary
+along with the aggregate counters. Blank timeline regions mean that no
+duration-bearing event was retained; unmeasured Python and zero-duration communicator
+operations do not produce intervals.
 
 Use :func:`mpi4py_simulator.visualization.render_stats_html` to generate the same
 standalone report in Python.

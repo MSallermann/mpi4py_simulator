@@ -167,6 +167,10 @@ def test_render_stats_html_embeds_trace_timeline() -> None:
     assert '"kind":"collective"' in report
     assert "Event timeline" in report
     assert "Trace events" in report
+    assert 'id="zoom-in"' in report
+    assert 'id="zoom-reset"' in report
+    assert 'addEventListener("wheel"' in report
+    assert 'addEventListener("pointermove"' in report
 
 
 def test_visualization_cli_writes_html_and_opens_browser(
