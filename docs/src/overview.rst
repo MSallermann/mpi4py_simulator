@@ -109,8 +109,17 @@ Install the package from the repository root:
    python -m pip install -e .
 
 Python 3.10 or newer is required. ``greenlet`` is installed as the single runtime
-dependency. mpi4py is optional: a production application may use it, while a virtual
-test does not need an MPI runtime.
+dependency. mpi4py is optional for simulation: a production application may use it,
+while a virtual test does not need an MPI runtime. Install the calibration extra only
+when measuring timing inputs with a real MPI communicator:
+
+.. code-block:: console
+
+   python -m pip install -e '.[calibration]'
+   mpiexec -n 2 python -m mpi4py_simulator.calibration
+
+See :doc:`calibration` for command options, application-specific payloads, and the
+limits of the fitted model.
 
 Build these docs with:
 
@@ -119,5 +128,6 @@ Build these docs with:
    python -m pip install -e '.[docs]'
    ./build_docs.sh --build-only
 
-Run ``./build_docs.sh`` without ``--build-only`` for documentation tests followed by
-a live-reloading development server.
+The script runs documentation tests in both modes. With ``--build-only`` it then
+builds static HTML; without that option it starts a live-reloading development
+server.

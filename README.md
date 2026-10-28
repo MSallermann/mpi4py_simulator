@@ -182,6 +182,40 @@ Byte rates are calibration inputs, not measurements taken while the simulation r
 The real time spent pickling or copying objects affects only how long the simulator
 command takes. It is not added to the simulated runtime.
 
+### Calibrating the timing inputs
+
+The optional calibration command measures a starting configuration with a real
+mpi4py communicator. Run it under MPI on the target system, with the process
+placement you intend to model:
+
+```bash
+python -m pip install -e '.[calibration]'
+mpiexec -n 2 python -m mpi4py_simulator.calibration
+```
+
+The command prints a `Simulator(size=..., ...)` expression and compares measured
+object-message times with the fitted model. Use `--sizes` to choose comma-separated
+byte-payload sizes, `--iterations` and `--warmups` to control sampling, or `--json`
+for machine-readable output. For example:
+
+```bash
+mpiexec -n 2 python -m mpi4py_simulator.calibration \
+  --sizes 0,1024,65536,1048576 --iterations 200 --json
+```
+
+For application-specific Python objects, use the programmatic
+`mpi4py_simulator.calibration.calibrate` API. Rank zero supplies at least two
+representative payloads with different serialized sizes; other ranks may pass
+`None`. The returned `result.simulator_kwargs` can be expanded directly into
+`Simulator(size=..., **result.simulator_kwargs)`.
+
+Calibration measures raw-buffer ping-pong, lowercase object ping-pong, pickle costs
+on rank zero, and a barrier. It cannot uniquely separate all MPI endpoint and network
+costs, and it does not add congestion, topology, or eager/rendezvous behavior to the
+model. Check the measured-versus-predicted sample times and validate a small real run
+before extrapolating. See the
+[timing and calibration guide](docs/src/calibration.rst) for the full workflow.
+
 ### Accounting for coordinator work
 
 Set `measure_python=True` once on `Simulator`; no source annotations are required.
@@ -238,7 +272,8 @@ more precision from an absolute time than the timing model contains.
 
 ## Installation
 
-Python 3.10 or newer is required. `mpi4py` itself is optional.
+Python 3.10 or newer is required. `mpi4py` itself is optional for simulation; it is
+required only by production MPI code and the calibration command.
 
 ```bash
 python -m pip install -e .
@@ -282,8 +317,9 @@ python -m pip install -e '.[docs]'
 ./build_docs.sh --build-only
 ```
 
-Run `./build_docs.sh` without an argument to execute documentation tests and start a
-live-reloading documentation server.
+The script always runs the documentation tests first. With `--build-only` it then
+builds static HTML; without an argument it starts a live-reloading documentation
+server.
 
 ## Development
 

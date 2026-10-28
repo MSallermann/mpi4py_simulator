@@ -19,6 +19,7 @@ dependencies = ["greenlet>=3"]
 [project.optional-dependencies]
 test = ["pytest>=7"]
 docs = ["sphinx>=7", "furo", "sphinx-autobuild"]
+calibration = ["mpi4py>=3.1"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
@@ -43,6 +44,7 @@ ignore = [
 "example.py" = ["C901", "D212", "T201"]
 "examples/*" = ["INP001", "N802", "T201", "TC003"]
 "src/mpi4py_simulator/simulator.py" = ["D105", "D107", "PLR0913", "SLF001"]
+"src/mpi4py_simulator/calibration.py" = ["T201"]
 "docs/src/conf.py" = ["INP001"]
 "src/mpi4py_simulator/_engine.py" = [
     "C901",

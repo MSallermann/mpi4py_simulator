@@ -31,3 +31,17 @@ are ``SUM``, ``PROD``, ``MIN``, and ``MAX``. ``DeadlockError`` reports an unfini
 set of ranks with no future event that can make progress. ``MPI`` groups the status,
 request, wildcard, and reduction helpers for dependencies that expect an MPI-like
 module namespace.
+
+Calibration
+-----------
+
+The calibration API lives in :mod:`mpi4py_simulator.calibration` so importing the
+main simulation package does not require mpi4py. See :doc:`calibration` for the
+measurement workflow and interpretation guidance.
+
+.. autofunction:: mpi4py_simulator.calibration.calibrate
+
+.. autoclass:: mpi4py_simulator.calibration.CalibrationResult
+   :members:
+
+.. autoclass:: mpi4py_simulator.calibration.CalibrationSample
