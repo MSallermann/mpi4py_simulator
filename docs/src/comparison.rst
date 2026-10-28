@@ -75,15 +75,16 @@ placement, MPI, Python, and system load.
 Visualize the simulated run
 ---------------------------
 
-Render the saved statistics as a standalone SVG:
+Render the saved statistics as a self-contained interactive HTML report:
 
 .. code-block:: console
 
    mpi4py-simulator-visualize simulation-stats.json \
-       --output simulation-stats.svg
+       --output simulation-stats.html
 
-The chart shows each rank's finish-time composition. See :doc:`results` for the JSON
-schema and an explanation of the derived ``Waiting / other`` segment.
+The report shows each rank's finish-time composition and provides sortable rank rows
+with exact timing details. See :doc:`results` for the JSON schema and an explanation
+of the derived ``Waiting / other`` segment.
 
 Interpreting the difference
 ---------------------------

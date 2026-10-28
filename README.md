@@ -111,7 +111,7 @@ more full laps, and the example verifies the recorded path:
 ```bash
 python examples/example_ring.py --ranks 8 --laps 2 \
   --hop-us 5 --stats ring-stats.json
-mpi4py-simulator-visualize ring-stats.json -o ring-stats.svg
+mpi4py-simulator-visualize ring-stats.json -o ring-stats.html
 ```
 
 ## What is reused and what must be adapted?
@@ -286,11 +286,19 @@ Import `SimulationStats` from `mpi4py_simulator`. The format includes all statis
 but not application-defined `rank_results`; see the
 [results guide](docs/src/results.rst) for its schema and validation behavior.
 
-Turn a saved document into a standalone SVG without additional dependencies:
+Turn a saved document into a self-contained interactive HTML report:
 
 ```bash
-mpi4py-simulator-visualize simulation-stats.json -o simulation-stats.svg
+mpi4py-simulator-visualize simulation-stats.json -o simulation-stats.html
 ```
+
+The command opens the report in the system default browser. Pass `--no-open` when
+generating it in CI, over SSH, or as part of another script. The file needs no server
+or external assets. Rank rows can be filtered and sorted; selecting one shows exact
+category totals, compute occupancy, delay to its first compute call, gaps between
+compute calls, and time after its last compute call. These intervals can contain
+measured Python or communication work; the saved statistics are aggregates, not a
+chronological trace.
 
 The Python command's total wall-clock duration is not the modeled runtime. With
 `measure_python=True`, measured per-rank execution slices contribute to `result.time`,

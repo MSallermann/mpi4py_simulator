@@ -108,28 +108,37 @@ per-rank arrays with inconsistent lengths rather than silently misinterpreting d
 Visualizing statistics
 ----------------------
 
-The package includes a dependency-free SVG renderer. Give it a saved statistics
-document and an output path:
+The package includes a dependency-free interactive HTML renderer. Give it a saved
+statistics document and an output path:
 
 .. code-block:: console
 
-   mpi4py-simulator-visualize simulation-stats.json --output simulation-stats.svg
+   mpi4py-simulator-visualize simulation-stats.json --output simulation-stats.html
 
 The equivalent module command works without installing the console entry point:
 
 .. code-block:: console
 
    python -m mpi4py_simulator.visualization simulation-stats.json \
-       --output simulation-stats.svg --max-ranks 64
+       --output simulation-stats.html --max-ranks 64
+
+The resulting file embeds its data, styles, and JavaScript and opens locally without
+a server or external assets. The command opens it in the system default browser;
+pass ``--no-open`` in CI, over SSH, or when another script manages the output. Rank
+rows can be filtered and sorted by rank, finish time, ``Waiting / other``, or compute
+occupancy. Selecting a row opens its exact timing details.
 
 Each horizontal rank bar decomposes its finish time into explicit modeled compute,
-automatically measured Python, communication CPU, and ``Waiting / other``. The last
-category is derived rather than traced: it can include blocking waits, transport,
-collectives, and idle time. For simulations larger than ``--max-ranks``, the chart
-keeps rank zero and the slowest-finishing ranks.
+automatically measured Python, communication CPU, and ``Waiting / other``. The detail
+panel also reports delay to the first compute call, gaps between compute calls, and
+time after the final compute call. These values help distinguish dispatch startup,
+starvation between tasks, and queue-draining or shutdown time. They are derived from
+aggregate counters and are not a chronological event trace; Python and communication
+work can occur within the first, gap, and tail intervals. For simulations larger than
+``--max-ranks``, the report keeps rank zero and the slowest-finishing ranks.
 
-Use :func:`mpi4py_simulator.visualization.render_stats_svg` to generate the same
-standalone SVG in Python.
+Use :func:`mpi4py_simulator.visualization.render_stats_html` to generate the same
+standalone report in Python.
 
 For a worker subset, useful derived metrics are:
 

@@ -49,4 +49,4 @@ measurement workflow and interpretation guidance.
 Visualization
 -------------
 
-.. autofunction:: mpi4py_simulator.visualization.render_stats_svg
+.. autofunction:: mpi4py_simulator.visualization.render_stats_html

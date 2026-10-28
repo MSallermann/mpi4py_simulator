@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mpi4py_simulator import Comm, SimulationStats, Simulator
-from mpi4py_simulator.visualization import main, render_stats_svg
+from mpi4py_simulator.visualization import main, render_stats_html
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,21 +76,74 @@ def test_simulation_stats_reject_invalid_values(
         SimulationStats.from_dict(document)
 
 
-def test_render_stats_svg() -> None:
-    svg = render_stats_svg(_stats(), width=800, max_ranks=2)
+def test_render_stats_html() -> None:
+    report = render_stats_html(_stats(), max_ranks=2)
 
-    assert svg.startswith("<svg")
-    assert "Simulation statistics" in svg
-    assert "rank 0" in svg
-    assert "rank 1" in svg
-    assert "Compute" in svg
+    assert report.startswith("<!doctype html>")
+    assert "Simulation statistics" in report
+    assert 'id="filter"' in report
+    assert "Waiting / other" in report
+    assert '"rank_count":2' in report
+    assert '"rank":0' in report
+    assert "not an event trace" in report
 
 
-def test_visualization_cli_writes_svg(tmp_path: Path) -> None:
+def test_render_stats_html_embeds_compute_window_diagnostics() -> None:
+    def program(comm: Comm) -> None:
+        comm.compute(1.0)
+        comm.barrier()
+        if comm.rank == 0:
+            comm.compute(1.0)
+
+    report = render_stats_html(
+        Simulator(2, collective_latency=0.5).run(program).stats,
+    )
+
+    assert '"gaps":0.5' in report
+    assert '"tail":0.5' in report
+    assert '"other":0.5' in report
+
+
+def test_visualization_cli_writes_html_and_opens_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     input_path = tmp_path / "stats.json"
-    output_path = tmp_path / "stats.svg"
+    input_path.write_text(_stats().to_json(), encoding="utf-8")
+    opened: list[tuple[str, int]] = []
+
+    def open_browser(url: str, new: int = 0) -> bool:
+        opened.append((url, new))
+        return True
+
+    monkeypatch.setattr("mpi4py_simulator.visualization.webbrowser.open", open_browser)
+
+    main([str(input_path)])
+
+    output_path = input_path.with_suffix(".html")
+    report = output_path.read_text(encoding="utf-8")
+    assert report.startswith("<!doctype html>")
+    assert opened == [(output_path.resolve().as_uri(), 2)]
+
+
+def test_visualization_cli_can_skip_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "stats.json"
     input_path.write_text(_stats().to_json(), encoding="utf-8")
 
-    main([str(input_path), "--output", str(output_path)])
+    def fail_to_open(_url: str, new: int = 0) -> bool:
+        pytest.fail(f"browser unexpectedly opened with new={new}")
 
-    assert output_path.read_text(encoding="utf-8").startswith("<svg")
+    monkeypatch.setattr("mpi4py_simulator.visualization.webbrowser.open", fail_to_open)
+
+    main([str(input_path), "--no-open"])
+
+
+def test_visualization_cli_rejects_non_html_output(tmp_path: Path) -> None:
+    input_path = tmp_path / "stats.json"
+    input_path.write_text(_stats().to_json(), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must use an .html"):
+        main([str(input_path), "--output", str(tmp_path / "stats.svg")])
