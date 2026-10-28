@@ -202,6 +202,7 @@ def _run_simulation(args: argparse.Namespace) -> None:
     result = Simulator(
         size=ranks,
         measure_python=True,
+        trace=True,
         **settings,
     ).run(simulated_rank)
     expected = actual.get("rank_zero_result")

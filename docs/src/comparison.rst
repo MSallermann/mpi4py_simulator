@@ -82,9 +82,10 @@ Render the saved statistics as a self-contained interactive HTML report:
    mpi4py-simulator-visualize simulation-stats.json \
        --output simulation-stats.html
 
-The report shows each rank's finish-time composition and provides sortable rank rows
-with exact timing details. See :doc:`results` for the JSON schema and an explanation
-of the derived ``Waiting / other`` segment.
+The example enables event tracing, so the report can switch between each rank's
+finish-time composition and a chronological event timeline. It also provides sortable
+rank rows with exact timing details. See :doc:`results` for the JSON schema and an
+explanation of the derived ``Waiting / other`` segment.
 
 Interpreting the difference
 ---------------------------

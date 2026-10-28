@@ -9,6 +9,7 @@ from ._engine import (
     Reduction,
     SimulationResult,
     SimulationStats,
+    TraceEvent,
 )
 from ._status import ANY_SOURCE, ANY_TAG, Status
 from .simulator import MPI, Comm, Request, Simulator
@@ -29,4 +30,5 @@ __all__ = [
     "SimulationStats",
     "Simulator",
     "Status",
+    "TraceEvent",
 ]

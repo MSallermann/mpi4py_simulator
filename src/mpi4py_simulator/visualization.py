@@ -44,6 +44,17 @@ def render_stats_html(
     """
     _validate_max_ranks(max_ranks)
     ranks = _select_ranks(stats, max_ranks)
+    events_by_rank = {rank: [] for rank in ranks}
+    for event in stats.trace_events:
+        if event.rank in events_by_rank:
+            events_by_rank[event.rank].append(
+                {
+                    "kind": event.kind,
+                    "start": event.start,
+                    "finish": event.finish,
+                    "detail": event.detail,
+                },
+            )
     report = {
         "time": stats.time,
         "rank_count": len(stats.rank_finish_seconds),
@@ -51,7 +62,8 @@ def render_stats_html(
         "messages_sent": stats.messages_sent,
         "messages_received": stats.messages_received,
         "pending_messages": stats.pending_messages,
-        "ranks": [_rank_record(stats, rank) for rank in ranks],
+        "trace_event_count": len(stats.trace_events),
+        "ranks": [_rank_record(stats, rank, events_by_rank[rank]) for rank in ranks],
     }
     # Keep the embedded JSON inert if future formats gain user-controlled strings.
     payload = json.dumps(report, separators=(",", ":"), allow_nan=False).replace(
@@ -61,7 +73,11 @@ def render_stats_html(
     return _REPORT_TEMPLATE.replace("__REPORT_DATA__", payload)
 
 
-def _rank_record(stats: SimulationStats, rank: int) -> dict[str, float | int | bool]:
+def _rank_record(
+    stats: SimulationStats,
+    rank: int,
+    events: list[dict[str, object]],
+) -> dict[str, object]:
     finish = stats.rank_finish_seconds[rank]
     compute = stats.rank_compute_seconds[rank]
     python = stats.rank_python_seconds[rank]
@@ -88,6 +104,7 @@ def _rank_record(stats: SimulationStats, rank: int) -> dict[str, float | int | b
         "last_compute": last_compute,
         "tail": tail,
         "has_compute": has_compute,
+        "events": events,
     }
 
 
@@ -210,10 +227,11 @@ body {
 main { max-width: 1440px; margin: 0 auto; padding: 28px; }
 h1 { margin: 0; font-size: clamp(24px, 3vw, 36px); letter-spacing: -0.03em; }
 h2 { margin: 0 0 14px; font-size: 18px; }
+h3 { margin: 20px 0 0; font-size: 14px; }
 .lede { margin: 6px 0 22px; color: var(--muted); }
 .summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 12px;
   margin-bottom: 18px;
 }
@@ -248,6 +266,7 @@ input, select {
   margin: 8px 0 16px;
   color: var(--muted);
 }
+.view-note { margin: -8px 0 14px; color: var(--muted); font-size: 12px; }
 .swatch {
   display: inline-block;
   width: 11px;
@@ -294,6 +313,15 @@ input, select {
 .python { background: var(--python); }
 .communication { background: var(--communication); }
 .other { background: var(--other); }
+.wait { background: #94a3b8; }
+.collective { background: #0d9488; }
+.trace-event {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 1px;
+  border-right: 1px solid rgb(255 255 255 / 0.45);
+}
 .empty { padding: 24px; color: var(--muted); text-align: center; }
 .omitted { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
 .details { align-self: start; position: sticky; top: 18px; padding: 18px; }
@@ -307,6 +335,17 @@ input, select {
 .metrics dt { color: var(--muted); }
 .metrics dd { margin: 0; font: 12px ui-monospace, monospace; text-align: right; }
 .note { margin: 14px 0 0; color: var(--muted); font-size: 12px; }
+.event-list {
+  max-height: 260px;
+  overflow: auto;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.event-list li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.event-kind { font-weight: 600; text-transform: capitalize; }
+.event-time { color: var(--muted); font: 11px ui-monospace, monospace; }
 @media (max-width: 900px) {
   main { padding: 18px; }
   .summary { grid-template-columns: repeat(2, 1fr); }
@@ -322,7 +361,7 @@ input, select {
 <body>
 <main>
   <h1>Simulation statistics</h1>
-  <p class="lede">Interactive aggregate timing and communication summary.</p>
+  <p class="lede">Interactive aggregate timing and optional event timeline.</p>
   <section class="summary" id="summary" aria-label="Simulation summary"></section>
   <div class="layout">
     <section class="chart-panel">
@@ -336,13 +375,13 @@ input, select {
           <option value="other">Waiting / other</option>
           <option value="occupancy">Lowest compute occupancy</option>
         </select></label>
+        <label>View<select id="view">
+          <option value="aggregate">Aggregate composition</option>
+          <option value="timeline">Event timeline</option>
+        </select></label>
       </div>
-      <div class="legend" aria-label="Timing categories">
-        <span><i class="swatch compute"></i>Compute</span>
-        <span><i class="swatch python"></i>Python</span>
-        <span><i class="swatch communication"></i>Communication CPU</span>
-        <span><i class="swatch other"></i>Waiting / other</span>
-      </div>
+      <div class="legend" id="legend" aria-label="Timing categories"></div>
+      <p class="view-note" id="view-note"></p>
       <div class="axis" aria-hidden="true">
         <span>Rank</span><div class="ticks" id="ticks"></div><span>Finish</span>
       </div>
@@ -356,12 +395,21 @@ input, select {
 <script>
 "use strict";
 const report = JSON.parse(document.getElementById("report-data").textContent);
-const categories = [
+const aggregateCategories = [
   ["compute", "Compute"],
   ["python", "Measured Python"],
   ["communication", "Communication CPU"],
   ["other", "Waiting / other"],
 ];
+const traceCategories = [
+  ["compute", "Compute"],
+  ["python", "Measured Python"],
+  ["communication", "Communication CPU"],
+  ["wait", "Blocking wait"],
+  ["collective", "Collective"],
+];
+const traceLabels = Object.fromEntries(traceCategories);
+const maxDetailEvents = 250;
 let selectedRank = report.ranks.length ? report.ranks[0].rank : null;
 
 function duration(value) {
@@ -399,7 +447,13 @@ function renderSummary() {
       `${report.messages_sent} sent / ${report.messages_received} received`,
     ),
     card("Pending", String(report.pending_messages)),
+    card("Trace events", String(report.trace_event_count)),
   );
+  const timelineOption = document.querySelector('#view option[value="timeline"]');
+  if (!report.trace_event_count) {
+    timelineOption.disabled = true;
+    timelineOption.textContent = "Event timeline (trace unavailable)";
+  }
   const ticks = document.getElementById("ticks");
   for (const fraction of [0, 0.25, 0.5, 0.75, 1]) {
     const tick = document.createElement("span");
@@ -411,6 +465,26 @@ function renderSummary() {
     ? `Rank 0 and the ${report.displayed_rank_count - 1} slowest ranks are ` +
       `included; ${omitted} omitted.`
     : "";
+}
+
+function renderLegend() {
+  const legend = document.getElementById("legend");
+  legend.replaceChildren();
+  const categories = document.getElementById("view").value === "timeline"
+    ? traceCategories
+    : aggregateCategories;
+  for (const [field, label] of categories) {
+    const item = document.createElement("span");
+    const swatch = document.createElement("i");
+    swatch.className = `swatch ${field}`;
+    item.append(swatch, label);
+    legend.append(item);
+  }
+  document.getElementById("view-note").textContent =
+    document.getElementById("view").value === "timeline"
+      ? "Blank regions have no retained interval; unmeasured Python and " +
+        "zero-duration operations do not create events."
+      : "Composition segments are totals, not chronological positions.";
 }
 
 function occupancy(rank) {
@@ -457,17 +531,33 @@ function renderRows() {
     name.textContent = String(rank.rank);
     const track = document.createElement("span");
     track.className = "track";
-    const fill = document.createElement("span");
-    fill.className = "fill";
-    fill.style.width = `${report.time ? 100 * rank.finish / report.time : 0}%`;
-    for (const [field, label] of categories) {
-      const segment = document.createElement("span");
-      segment.className = `segment ${field}`;
-      segment.style.width = `${rank.finish ? 100 * rank[field] / rank.finish : 0}%`;
-      segment.title = `${label}: ${exactDuration(rank[field])}`;
-      fill.append(segment);
+    if (document.getElementById("view").value === "timeline") {
+      for (const event of rank.events) {
+        const segment = document.createElement("span");
+        segment.className = `trace-event ${event.kind}`;
+        segment.style.left = `${report.time ? 100 * event.start / report.time : 0}%`;
+        segment.style.width = report.time
+          ? `${100 * (event.finish - event.start) / report.time}%`
+          : "0%";
+        segment.title =
+          `${traceLabels[event.kind]}: ${event.detail} · ` +
+          `${exactDuration(event.start)} to ${exactDuration(event.finish)}`;
+        track.append(segment);
+      }
+    } else {
+      const fill = document.createElement("span");
+      fill.className = "fill";
+      fill.style.width = `${report.time ? 100 * rank.finish / report.time : 0}%`;
+      for (const [field, label] of aggregateCategories) {
+        const segment = document.createElement("span");
+        segment.className = `segment ${field}`;
+        segment.style.width =
+          `${rank.finish ? 100 * rank[field] / rank.finish : 0}%`;
+        segment.title = `${label}: ${exactDuration(rank[field])}`;
+        fill.append(segment);
+      }
+      track.append(fill);
     }
-    track.append(fill);
     const finish = document.createElement("span");
     finish.className = "finish";
     finish.textContent = duration(rank.finish);
@@ -516,8 +606,36 @@ function renderDetails(rank) {
   note.className = "note";
   note.textContent =
     "First, gaps, and tail locate the compute window but can include Python " +
-    "and communication work. These aggregates are not an event trace.";
+    "and communication work. Use the event timeline for chronological detail.";
   details.append(label, heading, list, note);
+  if (rank.events.length) {
+    const eventHeading = document.createElement("h3");
+    eventHeading.textContent = `Trace events (${rank.events.length})`;
+    const events = document.createElement("ul");
+    events.className = "event-list";
+    for (const event of rank.events.slice(0, maxDetailEvents)) {
+      const item = document.createElement("li");
+      const kind = document.createElement("div");
+      kind.className = "event-kind";
+      kind.textContent = `${traceLabels[event.kind]} · ${event.detail}`;
+      const timing = document.createElement("div");
+      timing.className = "event-time";
+      timing.textContent =
+        `${duration(event.start)} to ${duration(event.finish)} · ` +
+        `${duration(event.finish - event.start)}`;
+      item.append(kind, timing);
+      events.append(item);
+    }
+    details.append(eventHeading, events);
+    if (rank.events.length > maxDetailEvents) {
+      const truncated = document.createElement("p");
+      truncated.className = "note";
+      truncated.textContent =
+        `Showing the first ${maxDetailEvents} of ${rank.events.length} events. ` +
+        "The timeline still includes every event.";
+      details.append(truncated);
+    }
+  }
 }
 
 function selectRank(rankNumber) {
@@ -529,7 +647,12 @@ function selectRank(rankNumber) {
 
 document.getElementById("filter").addEventListener("input", renderRows);
 document.getElementById("sort").addEventListener("change", renderRows);
+document.getElementById("view").addEventListener("change", () => {
+  renderLegend();
+  renderRows();
+});
 renderSummary();
+renderLegend();
 renderRows();
 if (report.ranks.length) renderDetails(report.ranks[0]);
 </script>

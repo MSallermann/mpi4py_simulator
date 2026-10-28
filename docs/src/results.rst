@@ -48,6 +48,10 @@ Rank results
 ``stats.pending_messages``
    Sent point-to-point messages not received when all programs returned.
 
+``stats.trace_events``
+   Chronological rank-local intervals captured when the simulator is constructed
+   with ``trace=True``. Empty when tracing is disabled.
+
 Collectives do not increment point-to-point counters. Their costs appear in rank
 finish times and the simulated runtime.
 
@@ -99,8 +103,10 @@ serializable.
    )
 
 The top-level JSON object contains ``format: "mpi4py-simulator.stats"``, an integer
-``version``, and a ``stats`` object. Version 1 uses the public statistics attribute
-names as keys and represents each per-rank tuple as a JSON array in rank order.
+``version``, and a ``stats`` object. Version 2 uses the public statistics attribute
+names as keys, represents each per-rank tuple as a JSON array in rank order, and adds
+``trace_events``. Each event records ``rank``, ``kind``, ``start``, ``finish``, and a
+short ``detail`` string. Version 1 documents without tracing remain readable.
 ``to_dict`` and ``from_dict`` expose the same structure without JSON encoding.
 Loaders reject unknown versions, missing or extra fields, invalid numeric values, and
 per-rank arrays with inconsistent lengths rather than silently misinterpreting data.
@@ -136,6 +142,22 @@ starvation between tasks, and queue-draining or shutdown time. They are derived 
 aggregate counters and are not a chronological event trace; Python and communication
 work can occur within the first, gap, and tail intervals. For simulations larger than
 ``--max-ranks``, the report keeps rank zero and the slowest-finishing ranks.
+
+Construct the simulator with ``trace=True`` to enable the report's ``Event timeline``
+view:
+
+.. code-block:: python
+
+   result = Simulator(size, trace=True).run(rank_main)
+
+The timeline places compute, automatically measured Python, local communication CPU,
+blocking wait, and collective intervals at their actual virtual start and finish
+times. Hover an interval for its operation and exact timestamps, or select the rank
+to inspect its event list. Tracing is opt-in because its memory use and serialized
+file size grow with the number of simulated operations. A measurement reset discards
+events before the final boundary along with the aggregate counters. Blank timeline
+regions mean that no duration-bearing event was retained; unmeasured Python and
+zero-duration communicator operations do not produce intervals.
 
 Use :func:`mpi4py_simulator.visualization.render_stats_html` to generate the same
 standalone report in Python.

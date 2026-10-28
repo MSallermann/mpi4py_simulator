@@ -81,9 +81,9 @@ MIN = Reduction("MIN", min)
 MAX = Reduction("MAX", max)
 
 _STATS_FORMAT = "mpi4py-simulator.stats"
-_STATS_FORMAT_VERSION = 1
+_STATS_FORMAT_VERSION = 2
 _STATS_DOCUMENT_FIELDS = frozenset({"format", "version", "stats"})
-_STATS_VALUE_FIELDS = frozenset(
+_STATS_VALUE_FIELDS_V1 = frozenset(
     {
         "time",
         "messages_sent",
@@ -97,6 +97,7 @@ _STATS_VALUE_FIELDS = frozenset(
         "rank_last_compute_finish_seconds",
     },
 )
+_STATS_VALUE_FIELDS_V2 = _STATS_VALUE_FIELDS_V1 | {"trace_events"}
 _STATS_RANK_FIELDS = (
     "rank_finish_seconds",
     "rank_compute_seconds",
@@ -105,6 +106,30 @@ _STATS_RANK_FIELDS = (
     "rank_compute_idle_seconds",
     "rank_last_compute_finish_seconds",
 )
+_TRACE_KINDS = frozenset(
+    {"compute", "python", "communication", "wait", "collective"},
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TraceEvent:
+    """One rank-local interval captured by optional event tracing.
+
+    Args:
+        rank: Virtual rank whose timeline contains the event.
+        kind: One of ``compute``, ``python``, ``communication``, ``wait``, or
+            ``collective``.
+        start: Event start relative to the active measurement boundary, in seconds.
+        finish: Event finish on the same timeline, in seconds.
+        detail: Short operation description suitable for visualization tooltips.
+
+    """
+
+    rank: int
+    kind: str
+    start: float
+    finish: float
+    detail: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +154,8 @@ class SimulationStats:
             rank. Initial waiting before a rank's first compute call is excluded.
         rank_last_compute_finish_seconds: End time of each rank's final ``compute``
             call. It is zero for ranks that never modeled computation.
+        trace_events: Rank-local simulated intervals captured when ``trace=True``.
+            The tuple is empty when tracing was disabled.
 
     Notes:
         Collective operations affect finish times but are not included in the
@@ -147,6 +174,7 @@ class SimulationStats:
     rank_communication_seconds: tuple[float, ...]
     rank_compute_idle_seconds: tuple[float, ...]
     rank_last_compute_finish_seconds: tuple[float, ...]
+    trace_events: tuple[TraceEvent, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return the versioned, JSON-compatible statistics document.
@@ -178,6 +206,16 @@ class SimulationStats:
                 "rank_last_compute_finish_seconds": list(
                     self.rank_last_compute_finish_seconds,
                 ),
+                "trace_events": [
+                    {
+                        "rank": event.rank,
+                        "kind": event.kind,
+                        "start": event.start,
+                        "finish": event.finish,
+                        "detail": event.detail,
+                    }
+                    for event in self.trace_events
+                ],
             },
         }
 
@@ -235,7 +273,7 @@ class SimulationStats:
         if isinstance(version, bool) or not isinstance(version, int):
             msg = "statistics format version must be an integer"
             raise TypeError(msg)
-        if version != _STATS_FORMAT_VERSION:
+        if version not in {1, _STATS_FORMAT_VERSION}:
             msg = f"unsupported statistics format version: {version}"
             raise ValueError(msg)
 
@@ -243,7 +281,10 @@ class SimulationStats:
         if not isinstance(values, Mapping):
             msg = "statistics document must contain a 'stats' mapping"
             raise TypeError(msg)
-        _validate_stats_fields(set(values), _STATS_VALUE_FIELDS, "statistics")
+        expected_fields = (
+            _STATS_VALUE_FIELDS_V1 if version == 1 else _STATS_VALUE_FIELDS_V2
+        )
+        _validate_stats_fields(set(values), expected_fields, "statistics")
 
         rank_values = {
             name: _deserialize_stats_times(name, values[name])
@@ -256,6 +297,15 @@ class SimulationStats:
         if rank_counts == {0}:
             msg = "per-rank statistics fields must contain at least one rank"
             raise ValueError(msg)
+
+        trace_events = (
+            _deserialize_trace_events(
+                values["trace_events"],
+                rank_values["rank_finish_seconds"],
+            )
+            if version == _STATS_FORMAT_VERSION
+            else ()
+        )
 
         return cls(
             time=_deserialize_stats_time("time", values["time"]),
@@ -279,6 +329,7 @@ class SimulationStats:
             rank_last_compute_finish_seconds=rank_values[
                 "rank_last_compute_finish_seconds"
             ],
+            trace_events=trace_events,
         )
 
     @classmethod
@@ -349,6 +400,50 @@ def _deserialize_stats_times(name: str, value: object) -> tuple[float, ...]:
         msg = f"statistics field {name!r} must be an array"
         raise TypeError(msg)
     return tuple(_deserialize_stats_time(name, item) for item in value)
+
+
+def _deserialize_trace_events(
+    value: object,
+    rank_finish_seconds: tuple[float, ...],
+) -> tuple[TraceEvent, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        msg = "statistics field 'trace_events' must be an array"
+        raise TypeError(msg)
+    events = []
+    expected_fields = frozenset({"rank", "kind", "start", "finish", "detail"})
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            msg = f"trace event {index} must be a mapping"
+            raise TypeError(msg)
+        _validate_stats_fields(set(item), expected_fields, f"trace event {index}")
+        rank = _deserialize_stats_count(f"trace event {index} rank", item["rank"])
+        if rank >= len(rank_finish_seconds):
+            msg = f"trace event {index} rank is outside the simulated world"
+            raise ValueError(msg)
+        kind = item["kind"]
+        if not isinstance(kind, str):
+            msg = f"trace event {index} kind must be a string"
+            raise TypeError(msg)
+        if kind not in _TRACE_KINDS:
+            msg = f"trace event {index} has unsupported kind: {kind!r}"
+            raise ValueError(msg)
+        start = _deserialize_stats_time(f"trace event {index} start", item["start"])
+        finish = _deserialize_stats_time(
+            f"trace event {index} finish",
+            item["finish"],
+        )
+        if finish < start:
+            msg = f"trace event {index} finishes before it starts"
+            raise ValueError(msg)
+        if finish > rank_finish_seconds[rank]:
+            msg = f"trace event {index} finishes after its rank"
+            raise ValueError(msg)
+        detail = item["detail"]
+        if not isinstance(detail, str):
+            msg = f"trace event {index} detail must be a string"
+            raise TypeError(msg)
+        events.append(TraceEvent(rank, kind, start, finish, detail))
+    return tuple(events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,6 +599,7 @@ class _EventEngine:
         serialization_bandwidth: float | None = None,
         deserialization_bandwidth: float | None = None,
         copy_messages: bool = True,
+        trace: bool = False,
     ) -> None:
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
             msg = "size must be a positive integer"
@@ -517,9 +613,8 @@ class _EventEngine:
         _validate_rate("bandwidth", bandwidth)
         _validate_rate("serialization_bandwidth", serialization_bandwidth)
         _validate_rate("deserialization_bandwidth", deserialization_bandwidth)
-        if not isinstance(copy_messages, bool):
-            msg = "copy_messages must be a boolean"
-            raise TypeError(msg)
+        _validate_boolean("copy_messages", copy_messages)
+        _validate_boolean("trace", trace)
 
         self.size = size
         self.latency = float(latency)
@@ -530,6 +625,7 @@ class _EventEngine:
         self.serialization_bandwidth = serialization_bandwidth
         self.deserialization_bandwidth = deserialization_bandwidth
         self.copy_messages = copy_messages
+        self.trace = trace
         self._measure_payloads = any(
             rate is not None
             for rate in (
@@ -563,6 +659,8 @@ class _EventEngine:
         self._messages_received = 0
         self._measurement_start = 0.0
         self._measurement_generation = 0
+        self._trace_events: list[TraceEvent] = []
+        self._trace_wait_starts: list[tuple[float, str, str] | None] = []
         self._completed = 0
 
     def run(self, create_task: Callable[[int], _Task]) -> SimulationResult:
@@ -604,6 +702,27 @@ class _EventEngine:
                 strict=True,
             )
         )
+        trace_events = tuple(
+            sorted(
+                (
+                    TraceEvent(
+                        event.rank,
+                        event.kind,
+                        max(0.0, event.start - self._measurement_start),
+                        max(0.0, event.finish - self._measurement_start),
+                        event.detail,
+                    )
+                    for event in self._trace_events
+                    if event.finish > self._measurement_start
+                ),
+                key=lambda event: (
+                    event.rank,
+                    event.start,
+                    event.finish,
+                    event.kind,
+                ),
+            )
+        )
         stats = SimulationStats(
             time=max(rank_finish_seconds, default=0.0),
             messages_sent=self._messages_sent,
@@ -615,6 +734,7 @@ class _EventEngine:
             rank_communication_seconds=tuple(self._rank_communication),
             rank_compute_idle_seconds=tuple(self._rank_compute_idle),
             rank_last_compute_finish_seconds=rank_last_compute_finish_seconds,
+            trace_events=trace_events,
         )
         return SimulationResult(tuple(self._results), stats)
 
@@ -641,6 +761,8 @@ class _EventEngine:
         self._messages_received = 0
         self._measurement_start = 0.0
         self._measurement_generation = 0
+        self._trace_events = []
+        self._trace_wait_starts = [None] * self.size
         self._completed = 0
 
     def _reset_measurement(self) -> None:
@@ -657,6 +779,31 @@ class _EventEngine:
         self._rank_has_computed = [False] * self.size
         self._messages_sent = 0
         self._messages_received = 0
+        self._trace_events = []
+        self._trace_wait_starts = [None] * self.size
+
+    def _record_trace(
+        self,
+        rank: int,
+        kind: str,
+        start: float,
+        finish: float,
+        detail: str,
+    ) -> None:
+        if self.trace and finish > start:
+            self._trace_events.append(TraceEvent(rank, kind, start, finish, detail))
+
+    def _begin_trace_wait(self, rank: int, kind: str, detail: str) -> None:
+        if self.trace and self._trace_wait_starts[rank] is None:
+            self._trace_wait_starts[rank] = (self._time, kind, detail)
+
+    def _end_trace_wait(self, rank: int, finish: float) -> None:
+        waiting = self._trace_wait_starts[rank]
+        if waiting is None:
+            return
+        start, kind, detail = waiting
+        self._trace_wait_starts[rank] = None
+        self._record_trace(rank, kind, start, finish, detail)
 
     def _schedule(self, time: float, callback: Callable[[], None]) -> None:
         # Monotonic sequence numbers make simultaneous events reproducible.
@@ -668,6 +815,7 @@ class _EventEngine:
         task = self._tasks[rank]
         if task is None:
             return
+        self._end_trace_wait(rank, self._time)
         self._rank_times[rank] = self._time
         self._waiting[rank] = None
         try:
@@ -703,6 +851,7 @@ class _EventEngine:
         finish = start + duration
         self._rank_python[rank] += duration
         self._rank_cpu_available[rank] = finish
+        self._record_trace(rank, "python", start, finish, "rank Python")
         self._waiting[rank] = "executing Python"
         self._schedule(finish, callback)
 
@@ -736,6 +885,7 @@ class _EventEngine:
             self._rank_compute[rank] += operation.duration
             self._rank_last_compute_finish[rank] = finish
             self._rank_has_computed[rank] = True
+            self._record_trace(rank, "compute", start, finish, "modeled compute")
             self._waiting[rank] = "computing"
             self._schedule(finish, lambda: self._resume(rank))
         elif isinstance(operation, _Probe):
@@ -765,8 +915,16 @@ class _EventEngine:
             self.serialization_bandwidth,
         )
         send_done = max(self._time, self._rank_cpu_available[rank]) + sender_cost
+        send_start = send_done - sender_cost
         self._rank_cpu_available[rank] = send_done
         self._rank_communication[rank] += sender_cost
+        self._record_trace(
+            rank,
+            "communication",
+            send_start,
+            send_done,
+            f"send to rank {operation.destination}, tag {operation.tag}",
+        )
         # Local posting/serialization occupies the sender first. Network transport
         # begins afterward and may overlap later work on either rank.
         arrival = send_done + self.latency + _byte_cost(size_bytes, self.bandwidth)
@@ -792,11 +950,17 @@ class _EventEngine:
         )
         if operation.status is not None:
             request._completion_statuses.append(operation.status)
+        if not operation.nonblocking:
+            request._waiters.append((rank, None, False))
+            self._begin_trace_wait(
+                rank,
+                "wait",
+                f"receive source {operation.source}, tag {operation.tag}",
+            )
         self._post_receive(request, operation.source, operation.tag)
         if operation.nonblocking:
             self._schedule(self._time, lambda: self._resume(rank, request))
         else:
-            request._waiters.append((rank, None, False))
             self._waiting[rank] = (
                 f"receiving source={operation.source}, tag={operation.tag}"
             )
@@ -861,8 +1025,18 @@ class _EventEngine:
         # Receiver overhead is CPU work, so multiple arrivals cannot deserialize in
         # parallel on the same rank.
         completion = max(self._time, self._rank_cpu_available[rank]) + receiver_cost
+        start = completion - receiver_cost
+        for waiter_rank, _, _ in request._waiters:
+            self._end_trace_wait(waiter_rank, start)
         self._rank_cpu_available[rank] = completion
         self._rank_communication[rank] += receiver_cost
+        self._record_trace(
+            rank,
+            "communication",
+            start,
+            completion,
+            f"receive from rank {message.source}, tag {message.tag}",
+        )
         self._schedule(
             completion,
             lambda: self._complete_receive(request, message),
@@ -912,6 +1086,7 @@ class _EventEngine:
             self._update_status(request, operation.status)
             self._schedule(self._time, lambda: self._resume(rank, request._value))
             return
+        self._begin_trace_wait(rank, "wait", "request completion")
         request._waiters.append((rank, operation.status, False))
         self._waiting[rank] = "waiting for a request"
         self._schedule_receive_completion(request)
@@ -925,6 +1100,7 @@ class _EventEngine:
             self._schedule(self._time, lambda: self._resume(rank, result))
         elif request._matched_message is not None:
             # A matched irecv still owes its receiver CPU/deserialization cost.
+            self._begin_trace_wait(rank, "wait", "receive processing")
             request._waiters.append((rank, operation.status, True))
             self._waiting[rank] = "deserializing a request"
             self._schedule_receive_completion(request)
@@ -941,6 +1117,11 @@ class _EventEngine:
             _set_status(operation.status, message.source, message.tag)
             self._schedule(self._time, lambda: self._resume(rank, True))
         elif operation.blocking:
+            self._begin_trace_wait(
+                rank,
+                "wait",
+                f"probe source {operation.source}, tag {operation.tag}",
+            )
             self._pending_probes[rank].append(
                 (operation.source, operation.tag, operation.status),
             )
@@ -973,6 +1154,11 @@ class _EventEngine:
         else:
             self._validate_collective(state.operation, operation)
         state.participants[rank] = self._copy(operation.value)
+        self._begin_trace_wait(
+            rank,
+            "collective",
+            f"{operation.kind} #{operation.sequence}",
+        )
         self._waiting[rank] = f"collective {operation.kind} #{operation.sequence}"
         if len(state.participants) != self.size:
             return
@@ -1149,6 +1335,12 @@ def _validate_rate(name: str, value: float | None) -> None:
     if value <= 0 or not math.isfinite(value):
         msg = f"{name} must be finite and positive"
         raise ValueError(msg)
+
+
+def _validate_boolean(name: str, value: object) -> None:
+    if not isinstance(value, bool):
+        msg = f"{name} must be a boolean"
+        raise TypeError(msg)
 
 
 def _byte_cost(size_bytes: int, rate: float | None) -> float:

@@ -723,6 +723,9 @@ class Simulator:
             sender cannot change a received value. Point-to-point messages use a
             pickle round trip when payload byte rates are configured; otherwise the
             simulator uses ``deepcopy``. Collective values use ``deepcopy``.
+        trace: Whether to retain rank-local compute, measured-Python, communication,
+            blocking-wait, and collective intervals for serialization and timeline
+            visualization. Disabled by default to avoid event-level memory growth.
 
     Raises:
         TypeError: If a timing or bandwidth argument has the wrong type, or a boolean
@@ -753,6 +756,7 @@ class Simulator:
         deserialization_bandwidth: float | None = None,
         measure_python: bool = False,
         copy_messages: bool = True,
+        trace: bool = False,
     ) -> None:
         """Configure rank count, message costs, and object-copy behavior.
 
@@ -771,10 +775,14 @@ class Simulator:
             measure_python: Whether to charge measured rank-program execution between
                 communicator calls to the corresponding virtual rank.
             copy_messages: Whether to copy communicated Python objects.
+            trace: Whether to retain detailed simulated event intervals.
 
         """
         if not isinstance(measure_python, bool):
             msg = "measure_python must be a boolean"
+            raise TypeError(msg)
+        if not isinstance(trace, bool):
+            msg = "trace must be a boolean"
             raise TypeError(msg)
         self._engine = _EventEngine(
             size,
@@ -786,6 +794,7 @@ class Simulator:
             serialization_bandwidth=serialization_bandwidth,
             deserialization_bandwidth=deserialization_bandwidth,
             copy_messages=copy_messages,
+            trace=trace,
         )
         self._measure_python = measure_python
 

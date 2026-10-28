@@ -14,6 +14,7 @@ from mpi4py_simulator import (
     DeadlockError,
     Simulator,
     Status,
+    TraceEvent,
 )
 
 
@@ -114,6 +115,48 @@ def test_collectives_and_virtual_compute() -> None:
     )
     assert result.time == pytest.approx(5.5)
     assert result.stats.rank_compute_seconds == (4.0, 3.0, 2.0, 1.0)
+
+
+def test_event_trace_records_rank_local_timeline() -> None:
+    def program(comm: Comm) -> None:
+        if comm.rank == 0:
+            comm.compute(1.0)
+            comm.send("work", dest=1, tag=7)
+        else:
+            assert comm.recv(source=0, tag=7) == "work"
+            comm.compute(0.5)
+        comm.barrier()
+
+    result = Simulator(
+        2,
+        latency=1.0,
+        send_overhead=0.25,
+        receive_overhead=0.5,
+        collective_latency=0.25,
+        trace=True,
+    ).run(program)
+
+    assert result.stats.trace_events == (
+        TraceEvent(0, "compute", 0.0, 1.0, "modeled compute"),
+        TraceEvent(0, "communication", 1.0, 1.25, "send to rank 1, tag 7"),
+        TraceEvent(0, "collective", 1.25, 3.5, "barrier #0"),
+        TraceEvent(1, "wait", 0.0, 2.25, "receive source 0, tag 7"),
+        TraceEvent(1, "communication", 2.25, 2.75, "receive from rank 0, tag 7"),
+        TraceEvent(1, "compute", 2.75, 3.25, "modeled compute"),
+        TraceEvent(1, "collective", 3.25, 3.5, "barrier #0"),
+    )
+
+
+def test_event_trace_is_opt_in_and_resets_with_measurement() -> None:
+    def program(comm: Comm) -> None:
+        comm.compute(1.0)
+        comm.reset_measurement()
+        comm.compute(2.0)
+
+    assert Simulator(1).run(program).stats.trace_events == ()
+    traced = Simulator(1, trace=True).run(program).stats.trace_events
+
+    assert traced == (TraceEvent(0, "compute", 0.0, 2.0, "modeled compute"),)
 
 
 def test_measurement_can_exclude_collective_setup() -> None:
@@ -328,12 +371,15 @@ def test_python_work_can_be_measured_automatically(
             return 42
         return 0
 
-    result = Simulator(2, measure_python=True).run(program)
+    result = Simulator(2, measure_python=True, trace=True).run(program)
 
     assert result.rank_results == (42, 0)
     assert result.stats.rank_python_seconds == pytest.approx((0.25, 0.0))
     assert result.stats.rank_compute_seconds == pytest.approx((0.0, 0.0))
     assert result.stats.rank_finish_seconds == pytest.approx((0.25, 0.0))
+    assert result.stats.trace_events == (
+        TraceEvent(0, "python", 0.0, 0.25, "rank Python"),
+    )
 
 
 def test_measured_python_slices_accumulate_across_operations(
@@ -375,6 +421,11 @@ def test_measurement_reset_excludes_measured_setup_python(
 def test_measure_python_must_be_boolean() -> None:
     with pytest.raises(TypeError, match="measure_python"):
         Simulator(1, measure_python=1)  # type: ignore[arg-type]
+
+
+def test_trace_must_be_boolean() -> None:
+    with pytest.raises(TypeError, match="trace"):
+        Simulator(1, trace=1)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("rate", [0.0, -1.0, float("inf"), float("nan")])

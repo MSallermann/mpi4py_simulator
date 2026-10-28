@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mpi4py_simulator import Comm, SimulationStats, Simulator
+from mpi4py_simulator import Comm, SimulationStats, Simulator, TraceEvent
 from mpi4py_simulator.visualization import main, render_stats_html
 
 if TYPE_CHECKING:
@@ -28,19 +28,69 @@ def test_simulation_stats_json_round_trip() -> None:
 
     document = stats.to_dict()
     assert document["format"] == "mpi4py-simulator.stats"
-    assert document["version"] == 1
+    assert document["version"] == 2
     values = document["stats"]
     assert isinstance(values, dict)
     assert values["rank_finish_seconds"] == [1.0, 2.0]
+    assert values["trace_events"] == []
     assert SimulationStats.from_dict(document) == stats
     assert SimulationStats.from_json(stats.to_json(indent=2)) == stats
 
 
 def test_simulation_stats_reject_unsupported_version() -> None:
     document = deepcopy(_stats().to_dict())
-    document["version"] = 2
+    document["version"] = 3
 
     with pytest.raises(ValueError, match="unsupported statistics format version"):
+        SimulationStats.from_dict(document)
+
+
+def test_simulation_stats_loads_version_one_without_trace() -> None:
+    document = deepcopy(_stats().to_dict())
+    document["version"] = 1
+    values = document["stats"]
+    assert isinstance(values, dict)
+    del values["trace_events"]
+
+    restored = SimulationStats.from_dict(document)
+
+    assert restored.trace_events == ()
+
+
+def test_simulation_stats_serializes_trace_events() -> None:
+    stats = _stats()
+    traced = SimulationStats(
+        stats.time,
+        stats.messages_sent,
+        stats.messages_received,
+        stats.pending_messages,
+        stats.rank_finish_seconds,
+        stats.rank_compute_seconds,
+        stats.rank_python_seconds,
+        stats.rank_communication_seconds,
+        stats.rank_compute_idle_seconds,
+        stats.rank_last_compute_finish_seconds,
+        (TraceEvent(0, "compute", 0.0, 1.0, "modeled compute"),),
+    )
+
+    assert SimulationStats.from_json(traced.to_json()) == traced
+
+
+def test_simulation_stats_rejects_invalid_trace_event() -> None:
+    document = deepcopy(_stats().to_dict())
+    values = document["stats"]
+    assert isinstance(values, dict)
+    values["trace_events"] = [
+        {
+            "rank": 0,
+            "kind": "network",
+            "start": 0.0,
+            "finish": 1.0,
+            "detail": "unsupported",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="unsupported kind"):
         SimulationStats.from_dict(document)
 
 
@@ -85,7 +135,7 @@ def test_render_stats_html() -> None:
     assert "Waiting / other" in report
     assert '"rank_count":2' in report
     assert '"rank":0' in report
-    assert "not an event trace" in report
+    assert "trace unavailable" in report
 
 
 def test_render_stats_html_embeds_compute_window_diagnostics() -> None:
@@ -102,6 +152,21 @@ def test_render_stats_html_embeds_compute_window_diagnostics() -> None:
     assert '"gaps":0.5' in report
     assert '"tail":0.5' in report
     assert '"other":0.5' in report
+
+
+def test_render_stats_html_embeds_trace_timeline() -> None:
+    def program(comm: Comm) -> None:
+        comm.compute(float(comm.rank + 1))
+        comm.barrier()
+
+    stats = Simulator(2, collective_latency=0.5, trace=True).run(program).stats
+    report = render_stats_html(stats)
+
+    assert '"trace_event_count":4' in report
+    assert '"kind":"compute"' in report
+    assert '"kind":"collective"' in report
+    assert "Event timeline" in report
+    assert "Trace events" in report
 
 
 def test_visualization_cli_writes_html_and_opens_browser(

@@ -80,6 +80,7 @@ result = Simulator(
     deserialization_bandwidth=700e6, # receiver-side pickle bytes per second
     collective_latency=10e-6,
     measure_python=True,              # include coordinator/bookkeeping execution
+    trace=True,                       # retain intervals for the HTML timeline
 ).run(virtual_rank)
 
 print(result.time)
@@ -274,6 +275,7 @@ still delay code after the boundary.
 | `stats.messages_sent` | Point-to-point messages posted. |
 | `stats.messages_received` | Point-to-point receives completed. |
 | `stats.pending_messages` | Messages left unmatched when all rank functions returned. |
+| `stats.trace_events` | Optional chronological intervals retained with `trace=True`. |
 
 Statistics have a versioned JSON representation for storage and analysis:
 
@@ -298,7 +300,10 @@ or external assets. Rank rows can be filtered and sorted; selecting one shows ex
 category totals, compute occupancy, delay to its first compute call, gaps between
 compute calls, and time after its last compute call. These intervals can contain
 measured Python or communication work; the saved statistics are aggregates, not a
-chronological trace.
+chronological trace. When the simulation used `trace=True`, switch to **Event
+timeline** for rank-local compute, Python, communication, wait, and collective
+intervals. Tracing is disabled by default because memory and JSON size grow with the
+number of simulated operations.
 
 The Python command's total wall-clock duration is not the modeled runtime. With
 `measure_python=True`, measured per-rank execution slices contribute to `result.time`,

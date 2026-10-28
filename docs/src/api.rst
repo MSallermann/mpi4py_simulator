@@ -18,6 +18,9 @@ The package exposes one synchronous simulation model.
 .. autoclass:: mpi4py_simulator.SimulationStats
    :members:
 
+.. autoclass:: mpi4py_simulator.TraceEvent
+   :members:
+
 .. autoclass:: mpi4py_simulator.Status
    :members:
 

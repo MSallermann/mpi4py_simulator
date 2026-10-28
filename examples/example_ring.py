@@ -101,6 +101,7 @@ def main() -> None:
     result = Simulator(
         size=args.ranks,
         latency=args.latency_us / 1_000_000,
+        trace=args.stats is not None,
     ).run(
         lambda comm: ring_rank(
             comm,
